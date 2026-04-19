@@ -10,6 +10,7 @@ The fix detects "thread not found" BadRequest errors and retries the send
 WITHOUT message_thread_id so the message still reaches the chat.
 """
 
+import logging
 import sys
 import types
 from types import SimpleNamespace
@@ -177,6 +178,25 @@ async def test_send_typing_retries_without_general_thread_when_not_found():
         {"chat_id": -100123, "action": "typing", "message_thread_id": 1},
         {"chat_id": -100123, "action": "typing", "message_thread_id": None},
     ]
+
+
+@pytest.mark.asyncio
+async def test_send_typing_logs_failure_at_info_level(caplog):
+    """Typing failures should be visible in normal logs with chat/thread context."""
+    adapter = _make_adapter()
+
+    async def mock_send_chat_action(**kwargs):
+        raise FakeBadRequest("Chat not found")
+
+    adapter._bot = SimpleNamespace(send_chat_action=mock_send_chat_action)
+
+    with caplog.at_level(logging.INFO, logger="gateway.platforms.telegram"):
+        await adapter.send_typing("123", metadata={"thread_id": "99999"})
+
+    assert any(
+        "Failed to send Telegram typing indicator for chat=123 thread=99999" in rec.getMessage()
+        for rec in caplog.records
+    )
 
 
 @pytest.mark.asyncio

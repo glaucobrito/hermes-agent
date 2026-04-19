@@ -1928,10 +1928,13 @@ class TelegramAdapter(BasePlatformAdapter):
                     else:
                         raise
             except Exception as e:
-                # Typing failures are non-fatal; log at debug level only.
-                logger.debug(
-                    "[%s] Failed to send Telegram typing indicator: %s",
+                # Typing failures are non-fatal, but for Telegram diagnostics we
+                # need them visible in normal logs.
+                logger.info(
+                    "[%s] Failed to send Telegram typing indicator for chat=%s thread=%s: %s",
                     self.name,
+                    chat_id,
+                    _typing_thread,
                     e,
                     exc_info=True,
                 )

@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import logging
 import sys
 import time
 import types
@@ -742,6 +743,41 @@ async def test_base_processing_releases_post_delivery_callback_after_main_send()
     sent_texts = [call["content"] for call in adapter.sent]
     assert sent_texts == ["done", "💾 Skill 'prospect-scanner' created."]
     assert released == [True]
+
+
+@pytest.mark.asyncio
+async def test_base_processing_logs_typing_loop_start(caplog):
+    """Typing-loop startup should be visible in INFO logs with chat/thread/session."""
+    adapter = ProgressCaptureAdapter()
+
+    async def _handler(event):
+        return "done"
+
+    adapter.set_message_handler(_handler)
+
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="-1001",
+        chat_type="group",
+        thread_id="17585",
+    )
+    event = MessageEvent(
+        text="hello",
+        message_type=MessageType.TEXT,
+        source=source,
+        message_id="msg-typing-log",
+    )
+    session_key = "agent:main:telegram:group:-1001:17585"
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    with caplog.at_level(logging.INFO, logger="gateway.platforms.base"):
+        await adapter._process_message_background(event, session_key)
+
+    assert any(
+        "Starting typing loop for chat=-1001 thread=17585 session=agent:main:telegram:group:-1001:17585"
+        in rec.getMessage()
+        for rec in caplog.records
+    )
 
 
 @pytest.mark.asyncio
