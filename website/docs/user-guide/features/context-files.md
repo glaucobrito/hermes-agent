@@ -1,7 +1,7 @@
 ---
 sidebar_position: 8
 title: "Context Files"
-description: "Project context files — .hermes.md, AGENTS.md, CLAUDE.md, global SOUL.md, and .cursorrules — automatically injected into every conversation"
+description: "Project context files — .hermes.md, AGENTS.md, OPERATING_POLICY.md, CLAUDE.md, global SOUL.md, and .cursorrules — automatically injected into every conversation"
 ---
 
 # Context Files
@@ -13,14 +13,15 @@ Hermes Agent automatically discovers and loads context files that shape how it b
 | File | Purpose | Discovery |
 |------|---------|-----------| 
 | **.hermes.md** / **HERMES.md** | Project instructions (highest priority) | Walks to git root |
+| **OPERATING_POLICY.md** | Project operational policy overlay | Walks to git root; appended after the main context |
 | **AGENTS.md** | Project instructions, conventions, architecture | CWD at startup + subdirectories progressively |
 | **CLAUDE.md** | Claude Code context files (also detected) | CWD at startup + subdirectories progressively |
 | **SOUL.md** | Global personality and tone customization for this Hermes instance | `HERMES_HOME/SOUL.md` only |
-| **.cursorrules** | Cursor IDE coding conventions | CWD only |
-| **.cursor/rules/*.mdc** | Cursor IDE rule modules | CWD only |
+| **.cursorrules** | Cursor IDE coding conventions | CWD only at startup + subdirectories progressively |
+| **.cursor/rules/*.mdc** | Cursor IDE rule modules | CWD only at startup + subdirectories progressively |
 
 :::info Priority system
-Only **one** project context type is loaded per session (first match wins): `.hermes.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`. **SOUL.md** is always loaded independently as the agent identity (slot #1).
+Only **one** main project context type is loaded per session (first match wins): `.hermes.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`. **OPERATING_POLICY.md** is loaded separately as an overlay when present. **SOUL.md** is always loaded independently as the agent identity (slot #1).
 :::
 
 ## AGENTS.md
@@ -29,15 +30,17 @@ Only **one** project context type is loaded per session (first match wins): `.he
 
 ### Progressive Subdirectory Discovery
 
-At session start, Hermes loads the `AGENTS.md` from your working directory into the system prompt. As the agent navigates into subdirectories during the session (via `read_file`, `terminal`, `search_files`, etc.), it **progressively discovers** context files in those directories and injects them into the conversation at the moment they become relevant.
+At session start, Hermes loads the main project context from your working directory into the system prompt. `.hermes.md` and `OPERATING_POLICY.md` can also be discovered from ancestor directories up to the git root. As the agent navigates into subdirectories during the session (via `read_file`, `terminal`, `search_files`, etc.), it **progressively discovers** additional context files in those directories and injects them into the conversation at the moment they become relevant.
 
 ```
 my-project/
-├── AGENTS.md              ← Loaded at startup (system prompt)
+├── AGENTS.md              ← Loaded at startup if it wins priority in cwd
+├── OPERATING_POLICY.md    ← Loaded at startup as overlay when present
 ├── frontend/
 │   └── AGENTS.md          ← Discovered when agent reads frontend/ files
 ├── backend/
-│   └── AGENTS.md          ← Discovered when agent reads backend/ files
+│   ├── AGENTS.md          ← Discovered when agent reads backend/ files
+│   └── OPERATING_POLICY.md← Can accompany backend hints as overlay
 └── shared/
     └── AGENTS.md          ← Discovered when agent reads shared/ files
 ```

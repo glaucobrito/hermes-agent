@@ -78,6 +78,18 @@ hermes-agent/
 
 **User config:** `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys)
 
+## Operating policy overlay
+
+This repo also carries `OPERATING_POLICY.md`. Treat it as a behavior overlay for autonomous coding work. Hermes now auto-discovers it as a native context overlay, so the runtime can load it without relying on this section alone.
+
+Operational mandates for this repo:
+- Use targeted search before broad file reads. Find the file/symbol first, then open only what is necessary.
+- Check real schema artifacts (`schema.sql`, migrations, contracts) before proposing SQL or repair migrations.
+- Cap blind exploration at 2 turns before asking for scope confirmation when ambiguity materially changes the patch target.
+- Before any non-trivial file write, log exactly 3 bullets: what will change, why it is needed, and why it preserves zero drift.
+- Record avoidable failures in `docs/lessons-learned/` so the same mistake does not burn turns twice.
+- Prefer Claude Code headless mode (`claude -p`, usually with `--max-turns`) over TUI flows when the task does not require interactive back-and-forth. TUI is the exception, not the default.
+
 ## File Dependency Chain
 
 ```

@@ -87,6 +87,7 @@ def _find_git_root(start: Path) -> Optional[Path]:
 
 
 _HERMES_MD_NAMES = (".hermes.md", "HERMES.md")
+_OPERATING_POLICY_NAMES = ("OPERATING_POLICY.md", "operating_policy.md")
 
 
 def _find_hermes_md(cwd: Path) -> Optional[Path]:
@@ -105,6 +106,21 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
             if candidate.is_file():
                 return candidate
         # Stop walking at the git root (or filesystem root).
+        if stop_at and directory == stop_at:
+            break
+    return None
+
+
+def _find_operating_policy_md(cwd: Path) -> Optional[Path]:
+    """Discover the nearest ``OPERATING_POLICY.md`` up to the git root."""
+    stop_at = _find_git_root(cwd)
+    current = cwd.resolve()
+
+    for directory in [current, *current.parents]:
+        for name in _OPERATING_POLICY_NAMES:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
         if stop_at and directory == stop_at:
             break
     return None
@@ -876,7 +892,7 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
 
 
 # =========================================================================
-# Context files (SOUL.md, AGENTS.md, .cursorrules)
+# Context files (SOUL.md, AGENTS.md, OPERATING_POLICY.md, .cursorrules)
 # =========================================================================
 
 def _truncate_content(content: str, filename: str, max_chars: int = CONTEXT_FILE_MAX_CHARS) -> str:
@@ -974,6 +990,28 @@ def _load_claude_md(cwd_path: Path) -> str:
     return ""
 
 
+def _load_operating_policy_md(cwd_path: Path) -> str:
+    """Nearest OPERATING_POLICY.md / operating_policy.md — walk to git root."""
+    operating_policy_path = _find_operating_policy_md(cwd_path)
+    if not operating_policy_path:
+        return ""
+    try:
+        content = operating_policy_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return ""
+        rel = operating_policy_path.name
+        try:
+            rel = str(operating_policy_path.relative_to(cwd_path))
+        except ValueError:
+            pass
+        content = _scan_context_content(content, rel)
+        result = f"## {rel}\n\n{content}"
+        return _truncate_content(result, "OPERATING_POLICY.md")
+    except Exception as e:
+        logger.debug("Could not read %s: %s", operating_policy_path, e)
+        return ""
+
+
 def _load_cursorrules(cwd_path: Path) -> str:
     """.cursorrules + .cursor/rules/*.mdc — cwd only."""
     cursorrules_content = ""
@@ -1007,11 +1045,15 @@ def _load_cursorrules(cwd_path: Path) -> str:
 def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
     """Discover and load context files for the system prompt.
 
-    Priority (first found wins — only ONE project context type is loaded):
+    Priority (first found wins for the main project context):
       1. .hermes.md / HERMES.md  (walk to git root)
       2. AGENTS.md / agents.md   (cwd only)
       3. CLAUDE.md / claude.md   (cwd only)
       4. .cursorrules / .cursor/rules/*.mdc  (cwd only)
+
+    Additional overlays:
+      - nearest OPERATING_POLICY.md / operating_policy.md (walk to git root,
+        appended after the main project context when present)
 
     SOUL.md from HERMES_HOME is independent and always included when present.
     Each context source is capped at 20,000 chars.
@@ -1034,6 +1076,10 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     )
     if project_context:
         sections.append(project_context)
+
+    operating_policy_context = _load_operating_policy_md(cwd_path)
+    if operating_policy_context:
+        sections.append(operating_policy_context)
 
     # SOUL.md from HERMES_HOME only — skip when already loaded as identity
     if not skip_soul:

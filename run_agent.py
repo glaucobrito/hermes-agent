@@ -1607,6 +1607,7 @@ class AIAgent:
 
         self._subdirectory_hints = SubdirectoryHintTracker(
             working_dir=os.getenv("TERMINAL_CWD") or None,
+            startup_context_loaded=not self.skip_context_files,
         )
         self._user_turn_count = 0
 

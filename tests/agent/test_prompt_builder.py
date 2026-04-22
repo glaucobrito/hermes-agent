@@ -489,6 +489,34 @@ class TestBuildContextFilesPrompt:
         assert "Ruff for linting" in result
         assert "Project Context" in result
 
+    def test_loads_operating_policy_md_as_overlay(self, tmp_path):
+        (tmp_path / "OPERATING_POLICY.md").write_text("Always search before reading full files.")
+        result = build_context_files_prompt(cwd=str(tmp_path))
+        assert "Always search before reading full files." in result
+        assert "OPERATING_POLICY.md" in result
+
+    def test_operating_policy_overlay_does_not_replace_agents_md(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Agent guidelines here.")
+        (tmp_path / "OPERATING_POLICY.md").write_text("Policy overlay here.")
+        result = build_context_files_prompt(cwd=str(tmp_path))
+        assert "Agent guidelines here." in result
+        assert "Policy overlay here." in result
+
+    def test_operating_policy_overlay_stacks_with_hermes_md(self, tmp_path):
+        (tmp_path / ".hermes.md").write_text("Hermes main context.")
+        (tmp_path / "OPERATING_POLICY.md").write_text("Policy overlay here.")
+        result = build_context_files_prompt(cwd=str(tmp_path))
+        assert "Hermes main context." in result
+        assert "Policy overlay here." in result
+
+    def test_operating_policy_overlay_discovered_from_parent_dir(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "OPERATING_POLICY.md").write_text("Root policy overlay.")
+        sub = tmp_path / "src" / "components"
+        sub.mkdir(parents=True)
+        result = build_context_files_prompt(cwd=str(sub))
+        assert "Root policy overlay." in result
+
     def test_loads_cursorrules(self, tmp_path):
         (tmp_path / ".cursorrules").write_text("Always use type hints.")
         result = build_context_files_prompt(cwd=str(tmp_path))

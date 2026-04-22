@@ -207,15 +207,15 @@ TIPS = [
     "SSRF protection blocks private networks, loopback, link-local, and cloud metadata addresses.",
     "Tirith pre-exec scanning detects homograph URL spoofing and pipe-to-interpreter patterns.",
     "MCP subprocesses receive a filtered environment — only safe system vars pass through.",
-    "Context files (.hermes.md, AGENTS.md) are security-scanned for prompt injection before loading.",
+    "Context files (.hermes.md, AGENTS.md, OPERATING_POLICY.md) are security-scanned for prompt injection before loading.",
     "command_allowlist in config.yaml permanently approves specific shell command patterns.",
 
     # --- Context & Compression ---
     "Context auto-compresses when it reaches the threshold — memories are flushed and history summarized.",
     "The status bar turns yellow, then orange, then red as context fills up.",
     "SOUL.md at ~/.hermes/SOUL.md is the agent's primary identity — customize it to shape behavior.",
-    "Hermes loads project context from .hermes.md, AGENTS.md, CLAUDE.md, or .cursorrules (first match).",
-    "Subdirectory AGENTS.md files are discovered progressively as the agent navigates into folders.",
+    "Hermes loads project context from .hermes.md, AGENTS.md, CLAUDE.md, or .cursorrules (first match), plus OPERATING_POLICY.md as an overlay.",
+    "Subdirectory AGENTS.md/CLAUDE.md/.cursorrules are discovered progressively as the agent navigates into folders; OPERATING_POLICY.md can accompany them as an overlay.",
     "Context files are capped at 20,000 characters with smart head/tail truncation.",
 
     # --- Browser ---

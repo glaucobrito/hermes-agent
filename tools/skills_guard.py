@@ -421,7 +421,7 @@ THREAT_PATTERNS = [
      "sets SUID/SGID bit on a file"),
 
     # ── Agent config persistence ──
-    (r'AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules',
+    (r'AGENTS\.md|CLAUDE\.md|OPERATING_POLICY\.md|\.cursorrules|\.clinerules',
      "agent_config_mod", "critical", "persistence",
      "references agent config files (could persist malicious instructions across sessions)"),
     (r'\.hermes/config\.yaml|\.hermes/SOUL\.md',

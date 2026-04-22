@@ -14,19 +14,21 @@ def project(tmp_path):
     # Root — already loaded at startup
     (tmp_path / "AGENTS.md").write_text("Root project instructions")
 
-    # backend/ — has its own AGENTS.md
+    # backend/ — has its own AGENTS.md and OPERATING_POLICY.md overlay
     backend = tmp_path / "backend"
     backend.mkdir()
     (backend / "AGENTS.md").write_text("Backend-specific instructions:\n- Use FastAPI\n- Always add type hints")
+    (backend / "OPERATING_POLICY.md").write_text("Backend policy overlay:\n- Search before reading entire files")
 
     # backend/src/ — no hints
     (backend / "src").mkdir()
     (backend / "src" / "main.py").write_text("print('hello')")
 
-    # frontend/ — has CLAUDE.md
+    # frontend/ — has CLAUDE.md and OPERATING_POLICY.md overlay
     frontend = tmp_path / "frontend"
     frontend.mkdir()
     (frontend / "CLAUDE.md").write_text("Frontend rules:\n- Use TypeScript\n- No any types")
+    (frontend / "OPERATING_POLICY.md").write_text("Frontend policy overlay:\n- Prefer targeted search")
 
     # docs/ — no hints
     (tmp_path / "docs").mkdir()
@@ -51,14 +53,15 @@ class TestSubdirectoryHintTracker:
         assert result is None
 
     def test_discovers_agents_md_via_ancestor_walk(self, project):
-        """Reading backend/src/main.py discovers backend/AGENTS.md via ancestor walk."""
+        """Reading backend/src/main.py discovers backend hints via ancestor walk."""
         tracker = SubdirectoryHintTracker(working_dir=str(project))
         result = tracker.check_tool_call(
             "read_file", {"path": str(project / "backend" / "src" / "main.py")}
         )
-        # backend/src/ has no hints, but ancestor walk finds backend/AGENTS.md
+        # backend/src/ has no hints, but ancestor walk finds backend hints
         assert result is not None
         assert "Backend-specific instructions" in result
+        assert "Backend policy overlay" in result
         # Second read in same subtree should not re-trigger
         result2 = tracker.check_tool_call(
             "read_file", {"path": str(project / "backend" / "AGENTS.md")}
@@ -66,13 +69,14 @@ class TestSubdirectoryHintTracker:
         assert result2 is None  # backend/ already loaded
 
     def test_discovers_claude_md(self, project):
-        """Frontend CLAUDE.md should be discovered."""
+        """Frontend CLAUDE.md should be discovered with its policy overlay."""
         tracker = SubdirectoryHintTracker(working_dir=str(project))
         result = tracker.check_tool_call(
             "read_file", {"path": str(project / "frontend" / "index.ts")}
         )
         assert result is not None
         assert "Frontend rules" in result
+        assert "Frontend policy overlay" in result
 
     def test_no_duplicate_loading(self, project):
         """Same directory should not be loaded twice."""
@@ -86,6 +90,48 @@ class TestSubdirectoryHintTracker:
             "read_file", {"path": str(project / "frontend" / "b.ts")}
         )
         assert result2 is None  # already loaded
+
+    def test_primary_context_still_first_wins_with_overlay(self, project):
+        frontend = project / "frontend"
+        (frontend / "AGENTS.md").write_text("Frontend AGENTS should win.")
+        tracker = SubdirectoryHintTracker(working_dir=str(project))
+        result = tracker.check_tool_call(
+            "read_file", {"path": str(frontend / "component.tsx")}
+        )
+        assert result is not None
+        assert "Frontend AGENTS should win." in result
+        assert "Frontend rules" not in result
+        assert "Frontend policy overlay" in result
+
+    def test_startup_loaded_parent_policy_is_not_reinjected(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "OPERATING_POLICY.md").write_text("Root policy already loaded at startup.")
+        subdir = tmp_path / "app" / "src"
+        subdir.mkdir(parents=True)
+        tracker = SubdirectoryHintTracker(working_dir=str(subdir), startup_context_loaded=True)
+        (tmp_path / "frontend").mkdir()
+        (tmp_path / "frontend" / "AGENTS.md").write_text("Frontend instructions")
+        result = tracker.check_tool_call(
+            "read_file", {"path": str(tmp_path / "frontend" / "index.ts")}
+        )
+        assert result is not None
+        assert "Frontend instructions" in result
+        assert "Root policy already loaded at startup." not in result
+
+    def test_parent_policy_is_injected_when_startup_context_was_skipped(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "OPERATING_POLICY.md").write_text("Root policy should appear lazily.")
+        subdir = tmp_path / "app" / "src"
+        subdir.mkdir(parents=True)
+        tracker = SubdirectoryHintTracker(working_dir=str(subdir), startup_context_loaded=False)
+        (tmp_path / "frontend").mkdir()
+        (tmp_path / "frontend" / "AGENTS.md").write_text("Frontend instructions")
+        result = tracker.check_tool_call(
+            "read_file", {"path": str(tmp_path / "frontend" / "index.ts")}
+        )
+        assert result is not None
+        assert "Frontend instructions" in result
+        assert "Root policy should appear lazily." in result
 
     def test_no_hints_in_empty_directory(self, project):
         """Directories without hint files return None."""
@@ -153,7 +199,7 @@ class TestSubdirectoryHintTracker:
         assert "Cursor rules for nested path" in result
 
     def test_hint_format_includes_path(self, project):
-        """Discovered hints should indicate which file they came from."""
+        """Discovered hints should indicate which files they came from."""
         tracker = SubdirectoryHintTracker(working_dir=str(project))
         result = tracker.check_tool_call(
             "read_file", {"path": str(project / "backend" / "file.py")}
@@ -161,6 +207,7 @@ class TestSubdirectoryHintTracker:
         assert result is not None
         assert "Subdirectory context discovered:" in result
         assert "AGENTS.md" in result
+        assert "OPERATING_POLICY.md" in result
 
     def test_truncation_of_large_hints(self, tmp_path):
         """Hint files over the limit are truncated."""

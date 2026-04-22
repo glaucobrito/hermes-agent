@@ -2,13 +2,15 @@
 
 As the agent navigates into subdirectories via tool calls (read_file, terminal,
 search_files, etc.), this module discovers and loads project context files
-(AGENTS.md, CLAUDE.md, .cursorrules) from those directories.  Discovered hints
-are appended to the tool result so the model gets relevant context at the moment
-it starts working in a new area of the codebase.
+(AGENTS.md, CLAUDE.md, OPERATING_POLICY.md, .cursorrules) from those directories.
+Discovered hints are appended to the tool result so the model gets relevant
+context at the moment it starts working in a new area of the codebase.
 
-This complements the startup context loading in ``prompt_builder.py`` which only
-loads from the CWD.  Subdirectory hints are discovered lazily and injected into
-the conversation without modifying the system prompt (preserving prompt caching).
+This complements the startup context loading in ``prompt_builder.py`` which loads
+project-level context from the launch directory (and, for `.hermes.md` /
+`OPERATING_POLICY.md`, ancestor directories up to the git root). Subdirectory
+hints are discovered lazily and injected into the conversation without
+modifying the system prompt (preserving prompt caching).
 
 Inspired by Block/goose's SubdirectoryHintTracker.
 """
@@ -19,17 +21,21 @@ import shlex
 from pathlib import Path
 from typing import Dict, Any, Optional, Set
 
-from agent.prompt_builder import _scan_context_content
+from agent.prompt_builder import _scan_context_content, _find_operating_policy_md
 
 logger = logging.getLogger(__name__)
 
-# Context files to look for in subdirectories, in priority order.
-# Same filenames as prompt_builder.py but we load ALL found (not first-wins)
-# since different subdirectories may use different conventions.
-_HINT_FILENAMES = [
+# Primary project context files in subdirectories, in priority order.
+# Mirror prompt_builder.py's first-wins behavior for the main context type.
+_PRIMARY_HINT_FILENAMES = [
     "AGENTS.md", "agents.md",
     "CLAUDE.md", "claude.md",
     ".cursorrules",
+]
+
+# Overlay files that should accompany the main context when present.
+_OVERLAY_HINT_FILENAMES = [
+    "OPERATING_POLICY.md", "operating_policy.md",
 ]
 
 # Maximum chars per hint file to prevent context bloat
@@ -58,9 +64,14 @@ class SubdirectoryHintTracker:
             tool_result += hints  # append to the tool result string
     """
 
-    def __init__(self, working_dir: Optional[str] = None):
+    def __init__(self, working_dir: Optional[str] = None, startup_context_loaded: bool = True):
         self.working_dir = Path(working_dir or os.getcwd()).resolve()
         self._loaded_dirs: Set[Path] = set()
+        self._startup_loaded_overlay_paths: Set[Path] = set()
+        if startup_context_loaded:
+            startup_policy = _find_operating_policy_md(self.working_dir)
+            if startup_policy is not None:
+                self._startup_loaded_overlay_paths.add(startup_policy.resolve())
         # Pre-mark the working dir as loaded (startup context handles it)
         self._loaded_dirs.add(self.working_dir)
 
@@ -173,7 +184,7 @@ class SubdirectoryHintTracker:
         self._loaded_dirs.add(directory)
 
         found_hints = []
-        for filename in _HINT_FILENAMES:
+        for filename in _PRIMARY_HINT_FILENAMES:
             hint_path = directory / filename
             try:
                 if not hint_path.is_file():
@@ -202,8 +213,39 @@ class SubdirectoryHintTracker:
                     except ValueError:
                         pass  # keep absolute
                 found_hints.append((rel_path, content))
-                # First match wins per directory (like startup loading)
                 break
+            except Exception as exc:
+                logger.debug("Could not read %s: %s", hint_path, exc)
+
+        for filename in _OVERLAY_HINT_FILENAMES:
+            hint_path = directory / filename
+            try:
+                if not hint_path.is_file():
+                    continue
+                if hint_path.resolve() in self._startup_loaded_overlay_paths:
+                    continue
+            except OSError:
+                continue
+            try:
+                content = hint_path.read_text(encoding="utf-8").strip()
+                if not content:
+                    continue
+                content = _scan_context_content(content, filename)
+                if len(content) > _MAX_HINT_CHARS:
+                    content = (
+                        content[:_MAX_HINT_CHARS]
+                        + f"\n\n[...truncated {filename}: {len(content):,} chars total]"
+                    )
+                rel_path = str(hint_path)
+                try:
+                    rel_path = str(hint_path.relative_to(self.working_dir))
+                except ValueError:
+                    try:
+                        rel_path = str(hint_path.relative_to(Path.home()))
+                        rel_path = "~/" + rel_path
+                    except ValueError:
+                        pass
+                found_hints.append((rel_path, content))
             except Exception as exc:
                 logger.debug("Could not read %s: %s", hint_path, exc)
 
