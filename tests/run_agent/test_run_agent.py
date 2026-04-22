@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import uuid
+import yaml
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import SimpleNamespace
@@ -860,6 +861,111 @@ class TestBuildSystemPrompt:
 
         assert "agent-harness-bootstrap" in prompt
         assert "Harness Gate: PASSA" in prompt
+
+    def test_injects_ai_engineering_router_guidance_when_local_gate_enabled_in_config(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("HERMES_LOCAL_SKILL_GUIDANCE", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"agent": {"local_skill_guidance": True}}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- ai-engineering-router: router\n</available_skills>"),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert agent._frozen_local_skill_guidance_enabled is True
+        assert "Classificação:" in prompt
+
+    def test_env_override_wins_over_config_for_local_skill_guidance(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_LOCAL_SKILL_GUIDANCE", "0")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"agent": {"local_skill_guidance": True}}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- ai-engineering-router: router\n</available_skills>"),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert agent._frozen_local_skill_guidance_enabled is False
+        assert "Classificação:" not in prompt
+
+    def test_string_false_config_does_not_enable_local_skill_guidance(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("HERMES_LOCAL_SKILL_GUIDANCE", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"agent": {"local_skill_guidance": "false"}}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        assert agent._frozen_local_skill_guidance_enabled is False
+
+    def test_malformed_agent_section_disables_local_skill_guidance(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        agent._agent_cfg = {"agent": []}
+        assert agent._local_skill_guidance_enabled() is False
 
     def test_does_not_inject_ai_engineering_router_guidance_when_local_gate_is_disabled(self):
         tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")

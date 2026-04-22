@@ -1225,6 +1225,14 @@ class AIAgent:
         # Track conversation messages for session logging
         self._session_messages: List[Dict[str, Any]] = []
         
+        # Load config once for prompt gating, memory, skills, and compression sections
+        try:
+            from hermes_cli.config import load_config as _load_agent_config
+            _agent_cfg = _load_agent_config()
+        except Exception:
+            _agent_cfg = {}
+        self._agent_cfg = _agent_cfg
+
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
         # Freeze local overlay decision for the life of the session.
@@ -1269,13 +1277,6 @@ class AIAgent:
         # In-memory todo list for task planning (one per agent/session)
         from tools.todo_tool import TodoStore
         self._todo_store = TodoStore()
-        
-        # Load config once for memory, skills, and compression sections
-        try:
-            from hermes_cli.config import load_config as _load_agent_config
-            _agent_cfg = _load_agent_config()
-        except Exception:
-            _agent_cfg = {}
 
         # Persistent memory (MEMORY.md + USER.md) -- loaded from disk
         self._memory_store = None
@@ -3074,10 +3075,22 @@ class AIAgent:
                 return True
         return False
 
-    @staticmethod
-    def _local_skill_guidance_enabled() -> bool:
-        """Enable Nina/Glauco-specific prompt overlays only for explicit local profiles."""
-        return os.getenv("HERMES_LOCAL_SKILL_GUIDANCE", "").strip().lower() in {"1", "true", "yes", "on"}
+    def _local_skill_guidance_enabled(self) -> bool:
+        """Enable Nina/Glauco-specific prompt overlays via config, with env override."""
+        env_value = os.getenv("HERMES_LOCAL_SKILL_GUIDANCE", "").strip()
+        if env_value:
+            return env_value.lower() in {"1", "true", "yes", "on"}
+
+        agent_cfg = getattr(self, "_agent_cfg", {})
+        if not isinstance(agent_cfg, dict):
+            return False
+        agent_section = agent_cfg.get("agent", {})
+        if not isinstance(agent_section, dict):
+            return False
+        configured = agent_section.get("local_skill_guidance", False)
+        if isinstance(configured, str):
+            return configured.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(configured)
 
     def _dump_api_request_debug(
         self,

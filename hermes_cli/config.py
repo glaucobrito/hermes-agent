@@ -366,6 +366,11 @@ DEFAULT_CONFIG = {
         # (force on/off for all models), or a list of model-name substrings
         # to match (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        # Local skill guidance overlays (Nina/Glauco-specific doctrine in the
+        # system prompt). Keep off by default; enable per profile in
+        # config.yaml when this Hermes home should inject the local router /
+        # harness overlays automatically.
+        "local_skill_guidance": False,
         # Staged inactivity warning: send a warning to the user at this
         # threshold before escalating to a full timeout.  The warning fires
         # once per run and does not interrupt the agent.  0 = disable warning.
@@ -807,7 +812,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 19,
+    "_config_version": 20,
 }
 
 # =============================================================================
@@ -2463,6 +2468,20 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                         print(f"  ✓ Migrated compression.summary_* → auxiliary.compression: {', '.join(migrated_keys)}")
                     else:
                         print("  ✓ Removed unused compression.summary_* keys")
+
+    # ── Version 19 → 20: persist local skill guidance gate in config.yaml ──
+    if current_ver < 20:
+        config = read_raw_config()
+        agent_cfg = config.get("agent", {})
+        if not isinstance(agent_cfg, dict):
+            agent_cfg = {}
+        if "local_skill_guidance" not in agent_cfg:
+            agent_cfg["local_skill_guidance"] = False
+            config["agent"] = agent_cfg
+            results["config_added"].append("agent.local_skill_guidance=false (default)")
+            save_config(config)
+            if not quiet:
+                print("  ✓ Added agent.local_skill_guidance=false")
 
     if current_ver < latest_ver and not quiet:
         print(f"Config version: {current_ver} → {latest_ver}")
