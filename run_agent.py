@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 import os
 import random
 import re
+
 import sys
 import tempfile
 import time
@@ -81,6 +82,8 @@ from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+    AI_ENGINEERING_ROUTER_GUIDANCE, HARNESS_GATE_GUIDANCE,
+    CLAUDE_CODE_EXECUTION_GUIDANCE, CODEX_AUXILIARY_GUIDANCE,
     build_nous_subscription_prompt,
 )
 from agent.model_metadata import (
@@ -1224,6 +1227,8 @@ class AIAgent:
         
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
+        # Freeze local overlay decision for the life of the session.
+        self._frozen_local_skill_guidance_enabled = self._local_skill_guidance_enabled()
         
         # Filesystem checkpoint manager (transparent — not a tool)
         from tools.checkpoint_manager import CheckpointManager
@@ -1840,7 +1845,7 @@ class AIAgent:
             )
 
         # ── Invalidate cached system prompt so it rebuilds next turn ──
-        self._cached_system_prompt = None
+        self._invalidate_system_prompt()
 
         # ── Update _primary_runtime so the change persists across turns ──
         _cc = self.context_compressor if hasattr(self, "context_compressor") and self.context_compressor else None
@@ -3048,6 +3053,32 @@ class AIAgent:
         summary["total_tokens"] = cu.total_tokens
         return summary
 
+    @staticmethod
+    def _skills_prompt_contains_skill(skills_prompt: str, skill_name: str) -> bool:
+        """Return True only when ``skill_name`` appears as an actual skill entry."""
+        if not skills_prompt or not skill_name:
+            return False
+
+        in_catalog = False
+        for line in skills_prompt.splitlines():
+            stripped = line.strip()
+            if stripped == "<available_skills>":
+                in_catalog = True
+                continue
+            if stripped == "</available_skills>":
+                break
+            if not in_catalog or not stripped.startswith("-"):
+                continue
+            match = re.match(r"^-\s+(.+?)(?::\s|$)", stripped)
+            if match and match.group(1).strip() == skill_name:
+                return True
+        return False
+
+    @staticmethod
+    def _local_skill_guidance_enabled() -> bool:
+        """Enable Nina/Glauco-specific prompt overlays only for explicit local profiles."""
+        return os.getenv("HERMES_LOCAL_SKILL_GUIDANCE", "").strip().lower() in {"1", "true", "yes", "on"}
+
     def _dump_api_request_debug(
         self,
         api_kwargs: Dict[str, Any],
@@ -3778,6 +3809,14 @@ class AIAgent:
             skills_prompt = ""
         if skills_prompt:
             prompt_parts.append(skills_prompt)
+            if self._frozen_local_skill_guidance_enabled and self._skills_prompt_contains_skill(skills_prompt, "ai-engineering-router"):
+                prompt_parts.append(AI_ENGINEERING_ROUTER_GUIDANCE)
+            if self._frozen_local_skill_guidance_enabled and self._skills_prompt_contains_skill(skills_prompt, "agent-harness-bootstrap"):
+                prompt_parts.append(HARNESS_GATE_GUIDANCE)
+            if self._skills_prompt_contains_skill(skills_prompt, "claude-code"):
+                prompt_parts.append(CLAUDE_CODE_EXECUTION_GUIDANCE)
+            if self._skills_prompt_contains_skill(skills_prompt, "codex"):
+                prompt_parts.append(CODEX_AUXILIARY_GUIDANCE)
 
         if not self.skip_context_files:
             # Use TERMINAL_CWD for context file discovery when set (gateway

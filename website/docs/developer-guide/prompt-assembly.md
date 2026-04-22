@@ -29,15 +29,16 @@ Primary files:
 The cached system prompt is assembled in roughly this order:
 
 1. agent identity — `SOUL.md` from `HERMES_HOME` when available, otherwise falls back to `DEFAULT_AGENT_IDENTITY` in `prompt_builder.py`
-2. tool-aware behavior guidance
-3. Honcho static block (when active)
-4. optional system message
-5. frozen MEMORY snapshot
-6. frozen USER profile snapshot
+2. tool-aware behavior guidance (memory/session/skills guidance, optional Nous subscription block, and tool-use enforcement)
+3. optional system message
+4. frozen MEMORY snapshot
+5. frozen USER profile snapshot
+6. optional external memory-provider block
 7. skills index
-8. context files (`AGENTS.md`, `.cursorrules`, `.cursor/rules/*.mdc`) — SOUL.md is **not** included here when it was already loaded as the identity in step 1
-9. timestamp / optional session ID
-10. platform hint
+8. conditional post-skills overlays — local profile overlays (e.g. Nina/Glauco router/harness doctrine) plus executor-protocol guidance when matching skills are listed
+9. context files (`AGENTS.md`, `.cursorrules`, `.cursor/rules/*.mdc`) — SOUL.md is **not** included here when it was already loaded as the identity in step 1
+10. timestamp / optional session ID
+11. platform hint
 
 When `skip_context_files` is set (e.g., subagent delegation), SOUL.md is not loaded and the hardcoded `DEFAULT_AGENT_IDENTITY` is used instead.
 
@@ -62,28 +63,27 @@ When the user references something from a past conversation or you
 suspect relevant cross-session context exists, use session_search
 to recall it before asking them to repeat themselves.
 
-# Tool-use enforcement (for GPT/Codex models only)
-You MUST use your tools to take action — do not describe what you
-would do or plan to do without actually doing it.
-...
+# Optional additions within layer 2
+[Nous subscription block when applicable]
+[Tool-use enforcement + model-specific execution guidance when applicable]
 
-# Layer 3: Honcho static block (when active)
-[Honcho personality/context data]
-
-# Layer 4: Optional system message (from config or API)
+# Layer 3: Optional system message (from config or API)
 [User-configured system message override]
 
-# Layer 5: Frozen MEMORY snapshot
+# Layer 4: Frozen MEMORY snapshot
 ## Persistent Memory
 - User prefers Python 3.12, uses pyproject.toml
 - Default editor is nvim
 - Working on project "atlas" in ~/code/atlas
 - Timezone: US/Pacific
 
-# Layer 6: Frozen USER profile snapshot
+# Layer 5: Frozen USER profile snapshot
 ## User Profile
 - Name: Alice
 - GitHub: alice-dev
+
+# Layer 6: Optional external memory-provider block
+[Provider-specific system prompt additions]
 
 # Layer 7: Skills index
 ## Skills (mandatory)
@@ -98,7 +98,11 @@ your task, load it with skill_view(name) and follow its instructions.
     - arxiv: Search and summarize arXiv papers
 </available_skills>
 
-# Layer 8: Context files (from project directory)
+# Layer 8: Conditional post-skills overlays
+# Local Nina/Glauco overlays and skill-linked executor guidance may appear here
+# when enabled and when matching skills are listed.
+
+# Layer 9: Context files (from project directory)
 # Project Context
 The following project context files have been loaded and should be followed:
 
@@ -107,11 +111,13 @@ This is the atlas project. Use pytest for testing. The main
 entry point is src/atlas/main.py. Always run `make lint` before
 committing.
 
-# Layer 9: Timestamp + session
-Current time: 2026-03-30T14:30:00-07:00
-Session: abc123
+# Layer 10: Timestamp + session
+Conversation started: Monday, March 30, 2026 02:30 PM
+Session ID: abc123
+Model: anthropic/claude-opus-4.6
+Provider: openrouter
 
-# Layer 10: Platform hint
+# Layer 11: Platform hint
 You are a CLI AI Agent. Try not to use markdown but simple text
 renderable inside a terminal.
 ```

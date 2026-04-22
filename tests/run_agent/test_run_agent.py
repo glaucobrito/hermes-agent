@@ -767,6 +767,257 @@ class TestBuildSystemPrompt:
         assert mock_skills.call_args.kwargs["available_tools"] == set(toolset_map)
         assert mock_skills.call_args.kwargs["available_toolsets"] == {"web", "skills"}
 
+    def test_injects_ai_engineering_router_guidance_when_router_skill_is_available(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- ai-engineering-router: router\n</available_skills>"),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=True),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "ai-engineering-router" in prompt
+        assert "Classificação:" in prompt
+
+    def test_does_not_inject_ai_engineering_router_guidance_when_router_skill_is_absent(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- writing-plans: planner\n</available_skills>"),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=True),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "Classificação:" not in prompt
+
+    def test_does_not_inject_ai_engineering_router_guidance_for_skill_descriptions_that_only_mention_it(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch(
+                "run_agent.build_skills_system_prompt",
+                return_value=(
+                    "<available_skills>\n"
+                    "  software-development:\n"
+                    "    - hermes-core-guidance-patch: patch core so ai-engineering-router guidance can be injected\n"
+                    "</available_skills>"
+                ),
+            ),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=True),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "Classificação:" not in prompt
+
+    def test_injects_harness_gate_guidance_when_harness_skill_is_available(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- agent-harness-bootstrap: harness\n</available_skills>"),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=True),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "agent-harness-bootstrap" in prompt
+        assert "Harness Gate: PASSA" in prompt
+
+    def test_does_not_inject_ai_engineering_router_guidance_when_local_gate_is_disabled(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- ai-engineering-router: router\n</available_skills>"),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=False),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "ai-engineering-router" in prompt
+        assert "Classificação:" not in prompt
+
+    def test_does_not_inject_harness_gate_guidance_when_harness_skill_is_absent(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- ai-engineering-router: router\n</available_skills>"),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=True),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "Harness Gate: PASSA" not in prompt
+
+    def test_does_not_inject_harness_gate_guidance_when_local_gate_is_disabled(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- agent-harness-bootstrap: harness\n</available_skills>"),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=False),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "agent-harness-bootstrap" in prompt
+        assert "Harness Gate: PASSA" not in prompt
+
+    def test_injects_claude_code_execution_guidance_when_claude_skill_is_available(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- claude-code: executor\n</available_skills>"),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "Claude Code" in prompt
+        assert "micro-waves" in prompt
+
+    def test_injects_codex_auxiliary_guidance_when_codex_skill_is_available(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- codex: reviewer\n</available_skills>"),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "auxiliary reviewer/rescue tool" in prompt
+        assert "codex review" in prompt
+
+    def test_does_not_inject_codex_auxiliary_guidance_when_codex_skill_is_absent(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="<available_skills>\n- claude-code: executor\n</available_skills>"),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=True),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "# Automatic Codex auxiliary protocol" not in prompt
+
+    def test_does_not_inject_codex_guidance_for_skills_that_only_mention_codex(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch(
+                "run_agent.build_skills_system_prompt",
+                return_value=(
+                    "<available_skills>\n"
+                    "  software-development:\n"
+                    "    - hermes-core-guidance-patch: wire codex review guidance into the core\n"
+                    "</available_skills>"
+                ),
+            ),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=True),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "# Automatic Codex auxiliary protocol" not in prompt
+
 
 class TestToolUseEnforcementConfig:
     """Tests for the agent.tool_use_enforcement config option."""

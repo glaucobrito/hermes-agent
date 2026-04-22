@@ -186,6 +186,50 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
+AI_ENGINEERING_ROUTER_GUIDANCE = (
+    "# Automatic AI Engineering routing\n"
+    "If the user's request appears to involve code changes, bug fixing, refactoring, "
+    "feature implementation, migrations, integrations, tests, or any task that could modify a codebase, "
+    "you MUST classify it before proceeding.\n"
+    "When the `ai-engineering-router` skill is available, load it first with skill_view('ai-engineering-router') "
+    "and follow its routing rules to classify the task as `trivial`, `ai-engineering-pipeline-lite`, "
+    "or `ai-engineering-pipeline-full`.\n"
+    "Start code-task execution by making the classification explicit in your response plan: "
+    "`Classificação: ...`, `Motivo: ...`, `Próximo fluxo: ...`.\n"
+    "Do not skip this classification just to move faster. If in doubt, choose the stricter route."
+)
+
+HARNESS_GATE_GUIDANCE = (
+    "# Automatic harness gate for sensitive work\n"
+    "If the task is sensitive — production, payment, auth, RLS, webhook, cron, provider externo, compliance, "
+    "fluxo clínico/médico, fila/retry, or anything with painful rollback — run a harness gate BEFORE execution.\n"
+    "When the `agent-harness-bootstrap` skill is available, load it first with skill_view('agent-harness-bootstrap') "
+    "and use the Nina harness checklist template under your Hermes home as the minimum rubric.\n"
+    "Make the result explicit before implementation with: `Harness Gate: PASSA`, `Harness Gate: PASSA COM RESSALVAS`, "
+    "or `Harness Gate: FALHA CRÍTICA DE HARNESS`, followed by `Motivo`, `Maior risco residual`, and `Evidência obrigatória antes de fechar`.\n"
+    "If the gate fails because frozen intent is missing, do not continue in improvisation mode. Create or update the minimal artifacts "
+    "using the Nina templates as fallback structure: `constitution-lite`, `story-spec`, and `execution-plan` in the project repo, "
+    "then reassess the harness gate before implementation.\n"
+    "Do not invoke the harness gate for trivial tasks, docs-only edits, or throwaway experiments."
+)
+
+CLAUDE_CODE_EXECUTION_GUIDANCE = (
+    "# Automatic Claude Code execution protocol\n"
+    "When the `claude-code` skill is available, prefer Claude Code as the default executor for coding work when that executor path fits the current environment.\n"
+    "Break work into human-sized micro-waves or micro-sub-waves instead of dumping a giant task.\n"
+    "Prepare the task clearly, dispatch Claude Code to execute, then audit the result yourself before declaring anything ready.\n"
+    "Do not default to Codex as the main builder when Claude Code is available. Claude builds; you review and decide."
+)
+
+CODEX_AUXILIARY_GUIDANCE = (
+    "# Automatic Codex auxiliary protocol\n"
+    "When the `codex` skill is available, use Codex as an auxiliary reviewer/rescue tool after Claude Code execution — not as the default primary executor.\n"
+    "Use Codex optionally for medium backend/deterministic work when a second pair of eyes can save retrabalho.\n"
+    "Use Codex obligatorily before final closure when the task involves auth, permissions, RLS, billing, webhooks, queues, cron, external providers, painful rollback, or multi-layer backend risk.\n"
+    "Prefer these roles: `codex review` for normal review, `codex adversarial review` for pressure-testing architecture and edge cases, and `codex rescue` only for a focused corrective pass once the problem is already identified.\n"
+    "Do not call Codex by reflex on trivial edits, docs-only changes, local copy/config tweaks, or tiny bugfixes already validated with strong evidence."
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "
