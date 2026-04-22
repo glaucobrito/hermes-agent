@@ -145,7 +145,7 @@ On messaging platforms, the agent sends the dangerous command details to the cha
 - Reply **yes**, **y**, **approve**, **ok**, or **go** to approve
 - Reply **no**, **n**, **deny**, or **cancel** to deny
 
-The `HERMES_EXEC_ASK=1` environment variable is automatically set when running the gateway.
+The gateway/TUI approval path now relies on `HERMES_GATEWAY_SESSION=1` rather than forcing `HERMES_EXEC_ASK=1`. `HERMES_EXEC_ASK` remains available as a compatibility override for non-gateway execution surfaces that still need approval prompts.
 
 ### Permanent Allowlist
 

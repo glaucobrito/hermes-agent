@@ -125,7 +125,7 @@ def test_enable_gateway_prompts_sets_gateway_env(monkeypatch):
     server._enable_gateway_prompts()
 
     assert server.os.environ["HERMES_GATEWAY_SESSION"] == "1"
-    assert server.os.environ["HERMES_EXEC_ASK"] == "1"
+    assert "HERMES_EXEC_ASK" not in server.os.environ
     assert server.os.environ["HERMES_INTERACTIVE"] == "1"
 
 

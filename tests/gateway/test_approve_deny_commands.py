@@ -22,6 +22,19 @@ from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
+@pytest.fixture(autouse=True)
+def _restore_gateway_env(monkeypatch):
+    saved = {k: os.environ.get(k) for k in ("HERMES_GATEWAY_SESSION", "HERMES_INTERACTIVE", "HERMES_EXEC_ASK")}
+    for key in saved:
+        monkeypatch.delenv(key, raising=False)
+    yield
+    for key, value in saved.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+
 def _make_source() -> SessionSource:
     return SessionSource(
         platform=Platform.TELEGRAM,
@@ -77,9 +90,42 @@ def _clear_approval_state():
     mod._pending.clear()
 
 
-# ------------------------------------------------------------------
-# Blocking gateway approval infrastructure (tools/approval.py)
-# ------------------------------------------------------------------
+def test_gateway_approval_mode_works_without_exec_ask(_restore_gateway_env):
+    import importlib
+    import gateway.run as gateway_run
+    gateway_run = importlib.reload(gateway_run)
+    from tools.approval import (
+        check_all_command_guards,
+        register_gateway_notify,
+        unregister_gateway_notify,
+        set_current_session_key,
+        reset_current_session_key,
+        resolve_gateway_approval,
+    )
+
+    session_key = "test-gateway-bootstrap"
+    seen = {}
+
+    def _notify(data):
+        seen.update(data)
+        threading.Thread(
+            target=lambda: (time.sleep(0.05), resolve_gateway_approval(session_key, "once")),
+            daemon=True,
+        ).start()
+
+    register_gateway_notify(session_key, _notify)
+    token = set_current_session_key(session_key)
+    try:
+        result = check_all_command_guards("rm -rf /tmp/test", "local")
+    finally:
+        reset_current_session_key(token)
+        unregister_gateway_notify(session_key)
+
+    assert seen["command"] == "rm -rf /tmp/test"
+    assert result["approved"] is True
+
+
+# ── Blocking gateway approval infrastructure (tools/approval.py)
 
 
 class TestBlockingGatewayApproval:
