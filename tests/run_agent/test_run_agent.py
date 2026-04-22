@@ -1018,6 +1018,70 @@ class TestBuildSystemPrompt:
 
         assert "# Automatic Codex auxiliary protocol" not in prompt
 
+    def test_router_overlay_is_inserted_after_skills_prompt_and_before_context_prompt(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value="SKILLS_PROMPT\n<available_skills>\n- ai-engineering-router: router\n</available_skills>"),
+            patch("run_agent.build_context_files_prompt", return_value="CONTEXT_PROMPT"),
+            patch("run_agent.load_soul_md", return_value=None),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=True),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=False,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert prompt.index("SKILLS_PROMPT") < prompt.index(run_agent.AI_ENGINEERING_ROUTER_GUIDANCE)
+        assert prompt.index(run_agent.AI_ENGINEERING_ROUTER_GUIDANCE) < prompt.index("CONTEXT_PROMPT")
+
+    def test_multiple_overlays_preserve_post_skills_pre_context_order(self):
+        tools = _make_tool_defs("skills_list", "skill_view", "skill_manage")
+        skills_prompt = (
+            "SKILLS_PROMPT\n<available_skills>\n"
+            "- ai-engineering-router: router\n"
+            "- agent-harness-bootstrap: harness\n"
+            "- claude-code: executor\n"
+            "- codex: reviewer\n"
+            "</available_skills>"
+        )
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, return_value="skills"),
+            patch("run_agent.build_skills_system_prompt", return_value=skills_prompt),
+            patch("run_agent.build_context_files_prompt", return_value="CONTEXT_PROMPT"),
+            patch("run_agent.load_soul_md", return_value=None),
+            patch.object(AIAgent, "_local_skill_guidance_enabled", return_value=True),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=False,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        expected_order = [
+            "SKILLS_PROMPT",
+            run_agent.AI_ENGINEERING_ROUTER_GUIDANCE,
+            run_agent.HARNESS_GATE_GUIDANCE,
+            run_agent.CLAUDE_CODE_EXECUTION_GUIDANCE,
+            run_agent.CODEX_AUXILIARY_GUIDANCE,
+            "CONTEXT_PROMPT",
+        ]
+        positions = [prompt.index(item) for item in expected_order]
+        assert positions == sorted(positions)
+
 
 class TestToolUseEnforcementConfig:
     """Tests for the agent.tool_use_enforcement config option."""
