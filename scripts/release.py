@@ -189,6 +189,7 @@ AUTHOR_MAP = {
     "73175452+Magaav@users.noreply.github.com": "Magaav",
     "mrflu1918@proton.me": "SPANISHFLU",
     "morganemoss@gmai.com": "mormio",
+    "glauco@armandopneus.com.br": "glaucobrito",
     "kopjop926@gmail.com": "cesareth",
     "fuleinist@gmail.com": "fuleinist",
     "jack.47@gmail.com": "JackTheGit",
