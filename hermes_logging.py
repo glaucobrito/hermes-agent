@@ -32,10 +32,12 @@ from typing import Optional, Sequence
 
 from hermes_constants import get_config_path, get_hermes_home
 
-# Sentinel to track whether setup_logging() has already run.  The function
-# is idempotent — calling it twice is safe but the second call is a no-op
-# unless ``force=True``.
+# Sentinel to track whether setup_logging() has already run.
+# ``_logging_modes_initialized`` tracks which mode-specific handlers have been
+# attached so a later ``mode='gateway'`` call can still add ``gateway.log``
+# after an earlier generic/CLI bootstrap.
 _logging_initialized = False
+_logging_modes_initialized: set[str] = set()
 
 # Thread-local storage for per-conversation session context.
 _session_context = threading.local()
@@ -194,12 +196,16 @@ def setup_logging(
     Path
         The ``logs/`` directory where files are written.
     """
-    global _logging_initialized
-    if _logging_initialized and not force:
-        home = hermes_home or get_hermes_home()
-        return home / "logs"
+    global _logging_initialized, _logging_modes_initialized
 
     home = hermes_home or get_hermes_home()
+    normalized_mode = (mode or "").strip().lower() or None
+    if force:
+        _logging_modes_initialized = set()
+    mode_already_initialized = normalized_mode in _logging_modes_initialized if normalized_mode else False
+    if _logging_initialized and not force and (normalized_mode is None or mode_already_initialized):
+        return home / "logs"
+
     log_dir = home / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -237,7 +243,7 @@ def setup_logging(
     )
 
     # --- gateway.log (INFO+, gateway component only) ------------------------
-    if mode == "gateway":
+    if normalized_mode == "gateway":
         _add_rotating_handler(
             root,
             log_dir / "gateway.log",
@@ -257,6 +263,8 @@ def setup_logging(
         logging.getLogger(name).setLevel(logging.WARNING)
 
     _logging_initialized = True
+    if normalized_mode:
+        _logging_modes_initialized.add(normalized_mode)
     return log_dir
 
 

@@ -24,11 +24,13 @@ import signal
 import tempfile
 import threading
 import time
+import weakref
 from collections import OrderedDict
-from contextvars import copy_context
+from contextvars import ContextVar, copy_context
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List
+from urllib.parse import urlsplit, urlunsplit
 
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
 
@@ -39,6 +41,7 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
 # from _enforce_agent_cache_cap() and _session_expiry_watcher() below.
 _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
+_OUTBOUND_ACTIVITY_DEPTH: ContextVar[int] = ContextVar("outbound_activity_depth", default=0)
 
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
@@ -340,6 +343,120 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
     return resolved
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_gateway_stderr_level(verbosity: Optional[int]) -> Optional[int]:
+    """Return stderr log level for gateway foreground/service runs.
+
+    Interactive TTY runs keep the historical default (WARNING at verbosity=0).
+    Non-interactive runs such as systemd/journal default to INFO so operational
+    routing/health logs are visible in `journalctl` without requiring `-v`.
+    """
+    if verbosity is None:
+        return None
+    if verbosity >= 2:
+        return logging.DEBUG
+    if verbosity >= 1:
+        return logging.INFO
+    try:
+        stderr_is_tty = sys.stderr.isatty()
+    except Exception:
+        stderr_is_tty = False
+    return logging.WARNING if stderr_is_tty else logging.INFO
+
+
+def _ensure_gateway_stderr_handler(level: Optional[int], *, gateway_info_only: bool = False) -> None:
+    """Attach, update, or remove the marked stderr handler for gateway logs."""
+    root = logging.getLogger()
+    gateway_logger = logging.getLogger("gateway")
+    marked_handlers = [
+        handler for handler in list(root.handlers)
+        if getattr(handler, "_hermes_gateway_stderr", False)
+    ]
+
+    if level is None:
+        for handler in marked_handlers:
+            root.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+        if hasattr(gateway_logger, "_hermes_prev_level"):
+            gateway_logger.setLevel(gateway_logger._hermes_prev_level)  # type: ignore[attr-defined]
+            delattr(gateway_logger, "_hermes_prev_level")
+        if hasattr(root, "_hermes_gateway_prev_level"):
+            root.setLevel(root._hermes_gateway_prev_level)  # type: ignore[attr-defined]
+            delattr(root, "_hermes_gateway_prev_level")
+        return
+
+    from agent.redact import RedactingFormatter
+
+    if not hasattr(gateway_logger, "_hermes_prev_level"):
+        current_effective = gateway_logger.getEffectiveLevel()
+        if level < current_effective:
+            gateway_logger._hermes_prev_level = gateway_logger.level  # type: ignore[attr-defined]
+            gateway_logger.setLevel(level)
+    elif level < gateway_logger.getEffectiveLevel():
+        gateway_logger.setLevel(level)
+
+    if not gateway_info_only and level < root.getEffectiveLevel():
+        if not hasattr(root, "_hermes_gateway_prev_level"):
+            root._hermes_gateway_prev_level = root.level  # type: ignore[attr-defined]
+        root.setLevel(level)
+
+    if marked_handlers:
+        handler = marked_handlers[0]
+        handler.setLevel(level)
+        handler.filters.clear()
+        for extra in marked_handlers[1:]:
+            root.removeHandler(extra)
+            try:
+                extra.close()
+            except Exception:
+                pass
+        if gateway_info_only:
+            from hermes_logging import COMPONENT_PREFIXES
+
+            class _GatewayStderrFilter(logging.Filter):
+                def filter(self, record: logging.LogRecord) -> bool:
+                    if record.levelno >= logging.WARNING:
+                        return True
+                    return record.name.startswith(COMPONENT_PREFIXES["gateway"])
+
+            handler.addFilter(_GatewayStderrFilter())
+        return
+
+    handler = logging.StreamHandler()
+    handler.setLevel(level)
+    handler.setFormatter(RedactingFormatter('%(levelname)s %(name)s: %(message)s'))
+    if gateway_info_only:
+        from hermes_logging import COMPONENT_PREFIXES
+
+        class _GatewayStderrFilter(logging.Filter):
+            def filter(self, record: logging.LogRecord) -> bool:
+                if record.levelno >= logging.WARNING:
+                    return True
+                return record.name.startswith(COMPONENT_PREFIXES["gateway"])
+
+        handler.addFilter(_GatewayStderrFilter())
+    handler._hermes_gateway_stderr = True  # type: ignore[attr-defined]
+    root.addHandler(handler)
+
+
+def _sanitize_base_url_for_logging(raw_url: Optional[str]) -> str:
+    if not raw_url:
+        return ""
+    try:
+        parsed = urlsplit(raw_url)
+    except Exception:
+        return ""
+    hostname = parsed.hostname or ""
+    if not hostname:
+        return ""
+    if parsed.port:
+        hostname = f"{hostname}:{parsed.port}"
+    return urlunsplit((parsed.scheme, hostname, parsed.path, "", ""))
+
 
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
@@ -685,6 +802,9 @@ class GatewayRunner:
         # Track platforms that failed to connect for background reconnection.
         # Key: Platform enum, Value: {"config": platform_config, "attempts": int, "next_retry": float}
         self._failed_platforms: Dict[Platform, Dict[str, Any]] = {}
+
+        # Mark adapters whose send() has been wrapped for health telemetry.
+        self._health_wrapped_adapters: weakref.WeakSet = weakref.WeakSet()
 
         # Track pending /update prompt responses per session.
         # Key: session_key, Value: True when a prompt is waiting for user input.
@@ -1279,6 +1399,104 @@ class GatewayRunner:
             )
         except Exception:
             pass
+
+    def _record_message_activity(
+        self,
+        direction: str,
+        *,
+        platform: Optional[str] = None,
+        chat_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        chat_type: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> None:
+        try:
+            from gateway.status import write_runtime_status
+            write_runtime_status(
+                activity_direction=direction,
+                activity_platform=platform,
+                activity_chat_id=chat_id,
+                activity_thread_id=thread_id,
+                activity_user_id=user_id,
+                activity_chat_type=chat_type,
+                activity_message_id=message_id,
+            )
+        except Exception:
+            pass
+
+    def _instrument_adapter_send(self, platform: Platform, adapter: BasePlatformAdapter) -> None:
+        if adapter in self._health_wrapped_adapters:
+            return
+
+        runner = self
+        platform_name = platform.value
+
+        def _wrap_method(method_name: str) -> None:
+            original = getattr(adapter, method_name, None)
+            if not callable(original):
+                return
+
+            async def _wrapped(chat_id: str, *args, **kwargs):
+                depth = _OUTBOUND_ACTIVITY_DEPTH.get()
+                depth_token = _OUTBOUND_ACTIVITY_DEPTH.set(depth + 1)
+                try:
+                    result = await original(chat_id, *args, **kwargs)
+                    if getattr(result, "success", False) and _OUTBOUND_ACTIVITY_DEPTH.get() == 1:
+                        metadata = kwargs.get("metadata") if isinstance(kwargs, dict) else None
+                        thread_id = None
+                        if isinstance(metadata, dict):
+                            raw_thread_id = metadata.get("thread_id")
+                            if raw_thread_id not in (None, ""):
+                                thread_id = str(raw_thread_id)
+                        runner._record_message_activity(
+                            "outbound",
+                            platform=platform_name,
+                            chat_id=str(chat_id),
+                            thread_id=thread_id,
+                            message_id=getattr(result, "message_id", None),
+                        )
+                    return result
+                finally:
+                    _OUTBOUND_ACTIVITY_DEPTH.reset(depth_token)
+
+            setattr(adapter, method_name, _wrapped)
+
+        _wrap_method("send")
+
+        for method_name in ("send_image", "send_voice", "send_video", "send_document", "send_image_file"):
+            try:
+                adapter_impl = getattr(adapter.__class__, method_name)
+                base_impl = getattr(BasePlatformAdapter, method_name)
+            except AttributeError:
+                continue
+            if adapter_impl is not base_impl:
+                _wrap_method(method_name)
+
+        self._health_wrapped_adapters.add(adapter)
+
+    def _log_turn_route_decision(
+        self,
+        *,
+        route: dict,
+        source,
+        session_key: str,
+        request_kind: str,
+        reviewer: str = "none",
+    ) -> None:
+        runtime = route.get("runtime") if isinstance(route, dict) else {}
+        runtime = runtime if isinstance(runtime, dict) else {}
+        logger.info(
+            "routing decision: kind=%s decider=hermes-gateway executor=aiagent reviewer=%s "
+            "platform=%s model=%s provider=%s base_url=%s reason=%s",
+            request_kind,
+            reviewer,
+            source.platform.value if getattr(source, "platform", None) else None,
+            route.get("model") if isinstance(route, dict) else None,
+            runtime.get("provider") or "default",
+            _sanitize_base_url_for_logging(runtime.get("base_url")),
+            route.get("reason") if isinstance(route, dict) else None,
+        )
     
     @staticmethod
     def _load_prefill_messages() -> List[Dict[str, Any]]:
@@ -2094,6 +2312,7 @@ class GatewayRunner:
             try:
                 success = await adapter.connect()
                 if success:
+                    self._instrument_adapter_send(platform, adapter)
                     self.adapters[platform] = adapter
                     self._sync_voice_mode_state_to_adapter(adapter)
                     connected_count += 1
@@ -2476,6 +2695,7 @@ class GatewayRunner:
 
                     success = await adapter.connect()
                     if success:
+                        self._instrument_adapter_send(platform, adapter)
                         self.adapters[platform] = adapter
                         self._sync_voice_mode_state_to_adapter(adapter)
                         self.delivery_router.adapters = self.adapters
@@ -3107,7 +3327,21 @@ class GatewayRunner:
         source = event.source
 
         # Internal events (e.g. background-process completion notifications)
-        # are system-generated and must skip user authorization.
+        # are system-generated and must not count as external ingress.
+        if getattr(event, "internal", False):
+            _record_inbound = False
+        else:
+            self._record_message_activity(
+                "inbound",
+                platform=source.platform.value if source.platform else None,
+                chat_id=source.chat_id,
+                thread_id=source.thread_id,
+                user_id=source.user_id,
+                chat_type=source.chat_type,
+                message_id=event.message_id,
+            )
+            _record_inbound = True
+
         if getattr(event, "internal", False):
             pass
         elif source.user_id is None:
@@ -3151,7 +3385,9 @@ class GatewayRunner:
                     # Record rate limit so subsequent messages are silently ignored
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
-        
+        else:
+            pass
+
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
         # forwarded it to the user; now the user's reply goes back via
@@ -6512,6 +6748,12 @@ class GatewayRunner:
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+            self._log_turn_route_decision(
+                route=turn_route,
+                source=source,
+                session_key=task_id,
+                request_kind="background",
+            )
 
             def run_sync():
                 agent = AIAgent(
@@ -6684,6 +6926,12 @@ class GatewayRunner:
             reasoning_config = self._load_reasoning_config()
             self._service_tier = self._load_service_tier()
             turn_route = self._resolve_turn_agent_config(question, model, runtime_kwargs)
+            self._log_turn_route_decision(
+                route=turn_route,
+                source=source,
+                session_key=task_id,
+                request_kind="btw",
+            )
             pr = self._provider_routing
 
             # Snapshot history from running agent or stored transcript
@@ -9634,6 +9882,7 @@ class GatewayRunner:
 
             # Re-read .env and config for fresh credentials (gateway is long-lived,
             # keys may change without restart).
+            turn_route = None
             try:
                 load_dotenv(_env_path, override=True, encoding="utf-8")
             except UnicodeDecodeError:
@@ -9832,6 +10081,13 @@ class GatewayRunner:
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides")
+
+            self._log_turn_route_decision(
+                route=turn_route,
+                source=source,
+                session_key=session_key,
+                request_kind="message",
+            )
 
             _bg_review_release = threading.Event()
             _bg_review_pending: list[str] = []
@@ -10815,11 +11071,13 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     When ``adapters`` and ``loop`` are provided, passes them through to the
     cron delivery path so live adapters can be used for E2EE rooms.
 
-    Also refreshes the channel directory every 5 minutes and prunes the
-    image/audio/document cache once per hour.
+    Also refreshes the channel directory every 5 minutes, emits a lightweight
+    runtime-status heartbeat every tick, and prunes the image/audio/document
+    cache once per hour.
     """
     from cron.scheduler import tick as cron_tick
     from gateway.platforms.base import cleanup_image_cache, cleanup_document_cache
+    from gateway.status import write_runtime_status
 
     IMAGE_CACHE_EVERY = 60   # ticks — once per hour at default 60s interval
     CHANNEL_DIR_EVERY = 5    # ticks — every 5 minutes
@@ -10831,6 +11089,16 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
             cron_tick(verbose=False, adapters=adapters, loop=loop)
         except Exception as e:
             logger.debug("Cron tick error: %s", e)
+
+        try:
+            # Health/observability heartbeat: the gateway can stay healthy for
+            # hours without changing platform state, so refresh updated_at even
+            # when nothing interesting happened. Preserve active_agents/platform
+            # details already on disk instead of recomputing them from this
+            # background thread.
+            write_runtime_status()
+        except Exception as e:
+            logger.debug("Runtime status heartbeat error: %s", e)
 
         tick_count += 1
 
@@ -10991,20 +11259,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     # Optional stderr handler — level driven by -v/-q flags on the CLI.
     # verbosity=None (-q/--quiet): no stderr output
-    # verbosity=0    (default):    WARNING and above
+    # verbosity=0 interactive TTY: WARNING and above
+    # verbosity=0 non-interactive: INFO and above (service/journal visibility)
     # verbosity=1    (-v):         INFO and above
     # verbosity=2+   (-vv/-vvv):   DEBUG
-    if verbosity is not None:
-        from agent.redact import RedactingFormatter
-
-        _stderr_level = {0: logging.WARNING, 1: logging.INFO}.get(verbosity, logging.DEBUG)
-        _stderr_handler = logging.StreamHandler()
-        _stderr_handler.setLevel(_stderr_level)
-        _stderr_handler.setFormatter(RedactingFormatter('%(levelname)s %(name)s: %(message)s'))
-        logging.getLogger().addHandler(_stderr_handler)
-        # Lower root logger level if needed so DEBUG records can reach the handler
-        if _stderr_level < logging.getLogger().level:
-            logging.getLogger().setLevel(_stderr_level)
+    _stderr_level = _resolve_gateway_stderr_level(verbosity)
+    _gateway_info_only = bool(verbosity == 0 and _stderr_level == logging.INFO)
+    _ensure_gateway_stderr_handler(_stderr_level, gateway_info_only=_gateway_info_only)
 
     runner = GatewayRunner(config)
     

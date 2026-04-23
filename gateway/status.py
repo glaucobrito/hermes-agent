@@ -17,15 +17,24 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Any, Optional
+from utils import atomic_json_write
 
 if sys.platform == "win32":
-    import msvcrt
+    try:
+        import msvcrt  # type: ignore
+    except Exception:  # pragma: no cover
+        msvcrt = None  # type: ignore
 else:
-    import fcntl
+    try:
+        import fcntl  # type: ignore
+    except Exception:  # pragma: no cover
+        fcntl = None  # type: ignore
 
 _GATEWAY_KIND = "hermes-gateway"
 _RUNTIME_STATUS_FILE = "gateway_state.json"
@@ -34,6 +43,8 @@ _IS_WINDOWS = sys.platform == "win32"
 _UNSET = object()
 _GATEWAY_LOCK_FILENAME = "gateway.lock"
 _gateway_lock_handle = None
+_RUNTIME_STATUS_WRITE_LOCK = threading.RLock()
+_RUNTIME_STATUS_FILE_LOCK = ".gateway_state.lock"
 
 
 def _get_pid_path() -> Path:
@@ -53,6 +64,35 @@ def _get_gateway_lock_path(pid_path: Optional[Path] = None) -> Path:
 def _get_runtime_status_path() -> Path:
     """Return the persisted runtime health/status file path."""
     return _get_pid_path().with_name(_RUNTIME_STATUS_FILE)
+
+
+def _get_runtime_status_lock_path() -> Path:
+    return _get_pid_path().with_name(_RUNTIME_STATUS_FILE_LOCK)
+
+
+@contextmanager
+def _runtime_status_lock():
+    lock_path = _get_runtime_status_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lock_file:
+        try:
+            if sys.platform == "win32" and msvcrt is not None:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            elif sys.platform != "win32" and fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            pass
+        try:
+            yield
+        finally:
+            try:
+                if sys.platform == "win32" and msvcrt is not None:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                elif sys.platform != "win32" and fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
 
 
 def _get_lock_dir() -> Path:
@@ -201,7 +241,14 @@ def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
 
 def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload))
+    existed_before = path.exists()
+    atomic_json_write(path, payload, indent=None, separators=(",", ": "))
+    if not existed_before:
+        try:
+            from hermes_cli.config import is_managed
+            os.chmod(path, 0o660 if is_managed() else 0o644)
+        except Exception:
+            pass
 
 
 def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
@@ -394,37 +441,62 @@ def write_runtime_status(
     platform_state: Any = _UNSET,
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
+    activity_direction: Any = _UNSET,
+    activity_platform: Any = _UNSET,
+    activity_chat_id: Any = _UNSET,
+    activity_thread_id: Any = _UNSET,
+    activity_user_id: Any = _UNSET,
+    activity_chat_type: Any = _UNSET,
+    activity_message_id: Any = _UNSET,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
-    payload = _read_json_file(path) or _build_runtime_status_record()
-    payload.setdefault("platforms", {})
-    payload.setdefault("kind", _GATEWAY_KIND)
-    payload["pid"] = os.getpid()
-    payload["start_time"] = _get_process_start_time(os.getpid())
-    payload["updated_at"] = _utc_now_iso()
+    with _RUNTIME_STATUS_WRITE_LOCK:
+        with _runtime_status_lock():
+            payload = _read_json_file(path) or _build_runtime_status_record()
+            payload.setdefault("platforms", {})
+            payload.setdefault("kind", _GATEWAY_KIND)
+            payload["pid"] = os.getpid()
+            payload["start_time"] = _get_process_start_time(os.getpid())
+            payload["updated_at"] = _utc_now_iso()
 
-    if gateway_state is not _UNSET:
-        payload["gateway_state"] = gateway_state
-    if exit_reason is not _UNSET:
-        payload["exit_reason"] = exit_reason
-    if restart_requested is not _UNSET:
-        payload["restart_requested"] = bool(restart_requested)
-    if active_agents is not _UNSET:
-        payload["active_agents"] = max(0, int(active_agents))
+            if gateway_state is not _UNSET:
+                payload["gateway_state"] = gateway_state
+            if exit_reason is not _UNSET:
+                payload["exit_reason"] = exit_reason
+            if restart_requested is not _UNSET:
+                payload["restart_requested"] = bool(restart_requested)
+            if active_agents is not _UNSET:
+                payload["active_agents"] = max(0, int(active_agents))
 
-    if platform is not _UNSET:
-        platform_payload = payload["platforms"].get(platform, {})
-        if platform_state is not _UNSET:
-            platform_payload["state"] = platform_state
-        if error_code is not _UNSET:
-            platform_payload["error_code"] = error_code
-        if error_message is not _UNSET:
-            platform_payload["error_message"] = error_message
-        platform_payload["updated_at"] = _utc_now_iso()
-        payload["platforms"][platform] = platform_payload
+            if platform is not _UNSET:
+                platform_payload = payload["platforms"].get(platform, {})
+                if platform_state is not _UNSET:
+                    platform_payload["state"] = platform_state
+                if error_code is not _UNSET:
+                    platform_payload["error_code"] = error_code
+                if error_message is not _UNSET:
+                    platform_payload["error_message"] = error_message
+                platform_payload["updated_at"] = _utc_now_iso()
+                payload["platforms"][platform] = platform_payload
 
-    _write_json_file(path, payload)
+            if activity_direction is not _UNSET:
+                direction = str(activity_direction).strip().lower()
+                if direction in {"inbound", "outbound"}:
+                    activity_key = f"last_{direction}"
+                    previous_payload = payload.get(activity_key, {}) if isinstance(payload.get(activity_key), dict) else {}
+                    activity_payload = {
+                        "timestamp": _utc_now_iso(),
+                        "platform": previous_payload.get("platform") if activity_platform is _UNSET else activity_platform,
+                        "chat_id": previous_payload.get("chat_id") if activity_chat_id is _UNSET else str(activity_chat_id),
+                        "thread_id": None if activity_thread_id is _UNSET or activity_thread_id in (None, "") else str(activity_thread_id),
+                        "user_id": None if activity_user_id is _UNSET or activity_user_id in (None, "") else str(activity_user_id),
+                        "chat_type": None if activity_chat_type is _UNSET else activity_chat_type,
+                        "message_id": previous_payload.get("message_id") if activity_message_id is _UNSET or activity_message_id in (None, "") else str(activity_message_id),
+                    }
+                    payload[activity_key] = activity_payload
+
+            _write_json_file(path, payload)
 
 
 def read_runtime_status() -> Optional[dict[str, Any]]:

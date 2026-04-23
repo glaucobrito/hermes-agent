@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 from types import SimpleNamespace
 
 from gateway import status
@@ -241,6 +242,51 @@ class TestGatewayRuntimeStatus:
         payload = status.read_runtime_status()
         assert payload["pid"] == os.getpid(), "PID should be overwritten, not preserved via setdefault"
         assert payload["start_time"] != 1000.0, "start_time should be overwritten on restart"
+
+    def test_write_runtime_status_serializes_concurrent_writes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        assert status._get_runtime_status_lock_path().name == ".gateway_state.lock"
+        original_write = status._write_json_file
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def slow_write(path, payload):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                import time
+                time.sleep(0.05)
+                original_write(path, payload)
+            finally:
+                with lock:
+                    active -= 1
+
+        monkeypatch.setattr(status, "_write_json_file", slow_write)
+
+        t1 = threading.Thread(target=status.write_runtime_status, kwargs={
+            "activity_direction": "inbound",
+            "activity_platform": "telegram",
+            "activity_chat_id": "123",
+            "activity_message_id": "111",
+        })
+        t2 = threading.Thread(target=status.write_runtime_status, kwargs={
+            "gateway_state": "running",
+        })
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert max_active == 1
+
+    def test_write_json_file_preserves_default_mode_on_first_create(self, tmp_path):
+        path = tmp_path / "gateway_state.json"
+        status._write_json_file(path, {"ok": True})
+        mode = path.stat().st_mode & 0o777
+        assert mode == 0o644
 
     def test_write_runtime_status_records_platform_failure(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
