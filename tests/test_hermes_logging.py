@@ -24,6 +24,7 @@ def _reset_logging_state():
     assertions are stable regardless of test ordering.
     """
     hermes_logging._logging_initialized = False
+    hermes_logging._logging_modes_initialized = set()
     root = logging.getLogger()
     # Strip ALL RotatingFileHandlers — not just the ones we added — so that
     # handlers leaked from other test modules in the same xdist worker don't
@@ -260,6 +261,62 @@ class TestGatewayMode:
             and "gateway.log" in getattr(h, "baseFilename", "")
         ]
         assert len(gw_handlers) == 0
+
+    def test_gateway_log_created_when_mode_upgrades_from_cli_to_gateway(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="cli")
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
+        root = logging.getLogger()
+
+        gw_handlers = [
+            h for h in root.handlers
+            if isinstance(h, RotatingFileHandler)
+            and "gateway.log" in getattr(h, "baseFilename", "")
+        ]
+        assert len(gw_handlers) == 1
+
+    def test_gateway_log_receives_gateway_records_after_cli_to_gateway_upgrade(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="cli")
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
+
+        gw_logger = logging.getLogger("gateway.run")
+        gw_logger.info("upgraded gateway record")
+
+        for h in logging.getLogger().handlers:
+            h.flush()
+
+        gw_log = hermes_home / "logs" / "gateway.log"
+        assert gw_log.exists()
+        assert "upgraded gateway record" in gw_log.read_text()
+
+    def test_gateway_mode_force_reinit_can_be_followed_by_normal_gateway_init(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="cli", force=True)
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
+
+        gw_handlers = [
+            h for h in logging.getLogger().handlers
+            if isinstance(h, RotatingFileHandler)
+            and "gateway.log" in getattr(h, "baseFilename", "")
+        ]
+        assert len(gw_handlers) == 1
+
+    def test_cli_to_gateway_upgrade_does_not_duplicate_core_handlers(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="cli")
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
+
+        root = logging.getLogger()
+        agent_handlers = [
+            h for h in root.handlers
+            if isinstance(h, RotatingFileHandler)
+            and "agent.log" in getattr(h, "baseFilename", "")
+        ]
+        error_handlers = [
+            h for h in root.handlers
+            if isinstance(h, RotatingFileHandler)
+            and "errors.log" in getattr(h, "baseFilename", "")
+        ]
+        assert len(agent_handlers) == 1
+        assert len(error_handlers) == 1
 
     def test_gateway_log_receives_gateway_records(self, hermes_home):
         """gateway.log captures records from gateway.* loggers."""
