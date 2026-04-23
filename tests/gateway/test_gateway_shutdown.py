@@ -105,13 +105,71 @@ async def test_gateway_stop_interrupts_after_drain_timeout():
 
     running_agent = MagicMock()
     runner._running_agents = {"session": running_agent}
+    runner._cleanup_global_tool_resources = MagicMock()
 
     with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
         await runner.stop()
 
     running_agent.interrupt.assert_called_once_with("Gateway shutting down")
+    assert runner._cleanup_global_tool_resources.call_count >= 1
+    runner._cleanup_global_tool_resources.assert_any_call(wait_for_mcp=True)
     disconnect_mock.assert_awaited_once()
     assert runner._shutdown_event.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_cleanup_happens_before_disconnect_after_drain_timeout():
+    runner, adapter = make_restart_runner()
+    runner._restart_drain_timeout = 0.05
+
+    order = []
+
+    async def _disconnect():
+        order.append("disconnect")
+
+    adapter.disconnect = AsyncMock(side_effect=_disconnect)
+
+    running_agent = MagicMock()
+    runner._running_agents = {"session": running_agent}
+    runner._cleanup_global_tool_resources = MagicMock(side_effect=lambda **kwargs: order.append(f"cleanup:{kwargs.get('wait_for_mcp')!s}"))
+
+    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+        await runner.stop()
+
+    assert order[0] == "cleanup:False"
+    assert "disconnect" in order
+
+
+def test_cleanup_global_tool_resources_can_skip_blocking_mcp_wait(monkeypatch):
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    calls = []
+
+    monkeypatch.setattr("tools.mcp_tool.shutdown_mcp_servers", lambda: calls.append("mcp"))
+    monkeypatch.setattr("tools.process_registry.process_registry.kill_all", lambda: calls.append("proc"))
+    monkeypatch.setattr("tools.terminal_tool.cleanup_all_environments", lambda: calls.append("term"))
+    monkeypatch.setattr("tools.browser_tool.cleanup_all_browsers", lambda: calls.append("browser"))
+
+    runner._cleanup_global_tool_resources(wait_for_mcp=False)
+
+    assert calls == ["proc", "term", "browser"]
+
+
+def test_cleanup_global_tool_resources_wait_path_runs_mcp_shutdown_once(monkeypatch):
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    calls = []
+
+    monkeypatch.setattr("tools.mcp_tool.shutdown_mcp_servers", lambda: calls.append("mcp"))
+    monkeypatch.setattr("tools.process_registry.process_registry.kill_all", lambda: calls.append("proc"))
+    monkeypatch.setattr("tools.terminal_tool.cleanup_all_environments", lambda: calls.append("term"))
+    monkeypatch.setattr("tools.browser_tool.cleanup_all_browsers", lambda: calls.append("browser"))
+
+    runner._cleanup_global_tool_resources(wait_for_mcp=True)
+
+    assert calls == ["proc", "term", "browser", "mcp"]
 
 
 @pytest.mark.asyncio

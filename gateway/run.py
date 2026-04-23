@@ -391,6 +391,12 @@ def _ensure_gateway_stderr_handler(level: Optional[int], *, gateway_info_only: b
 
     from agent.redact import RedactingFormatter
 
+    if not marked_handlers:
+        if hasattr(gateway_logger, "_hermes_prev_level"):
+            delattr(gateway_logger, "_hermes_prev_level")
+        if hasattr(root, "_hermes_gateway_prev_level"):
+            delattr(root, "_hermes_gateway_prev_level")
+
     if not hasattr(gateway_logger, "_hermes_prev_level"):
         current_effective = gateway_logger.getEffectiveLevel()
         if level < current_effective:
@@ -765,11 +771,11 @@ class GatewayRunner:
         self._exit_code: Optional[int] = None
         self._draining = False
         self._restart_requested = False
-        self._restart_task_started = False
         self._restart_detached = False
         self._restart_via_service = False
-        self._stop_task: Optional[asyncio.Task] = None
-        
+        self._restart_task_started = False
+        self._restart_drain_timeout = self._load_restart_drain_timeout()
+
         # Track running agents per session for interrupt support
         # Key: session_key, Value: AIAgent instance
         self._running_agents: Dict[str, Any] = {}
@@ -1974,6 +1980,31 @@ class GatewayRunner:
                 pass
             self._cleanup_agent_resources(agent)
 
+    def _cleanup_global_tool_resources(self, *, wait_for_mcp: bool = True) -> None:
+        """Best-effort cleanup for tool subprocesses/envs that can block shutdown."""
+        try:
+            from tools.process_registry import process_registry
+            process_registry.kill_all()
+        except Exception:
+            pass
+        try:
+            from tools.terminal_tool import cleanup_all_environments
+            cleanup_all_environments()
+        except Exception:
+            pass
+        try:
+            from tools.browser_tool import cleanup_all_browsers
+            cleanup_all_browsers()
+        except Exception:
+            pass
+        if not wait_for_mcp:
+            return
+        try:
+            from tools.mcp_tool import shutdown_mcp_servers
+            shutdown_mcp_servers()
+        except Exception:
+            pass
+
     def _cleanup_agent_resources(self, agent: Any) -> None:
         """Best-effort cleanup for temporary or cached agent instances."""
         if agent is None:
@@ -2836,6 +2867,10 @@ class GatewayRunner:
                 self._interrupt_running_agents(
                     _INTERRUPT_REASON_GATEWAY_RESTART if self._restart_requested else _INTERRUPT_REASON_GATEWAY_SHUTDOWN
                 )
+                # Fast cleanup first to unblock agent/tool threads before the
+                # final synchronous teardown phase. Keep MCP shutdown for the
+                # end-of-stop cleanup so we don't stall the timeout path here.
+                self._cleanup_global_tool_resources(wait_for_mcp=False)
                 interrupt_deadline = asyncio.get_running_loop().time() + 5.0
                 while self._running_agents and asyncio.get_running_loop().time() < interrupt_deadline:
                     self._update_runtime_status("draining")
@@ -2873,25 +2908,12 @@ class GatewayRunner:
             self._pending_approvals.clear()
             if hasattr(self, '_busy_ack_ts'):
                 self._busy_ack_ts.clear()
-            self._shutdown_event.set()
-
             # Global cleanup: kill any remaining tool subprocesses not tied
-            # to a specific agent (catch-all for zombie prevention).
-            try:
-                from tools.process_registry import process_registry
-                process_registry.kill_all()
-            except Exception:
-                pass
-            try:
-                from tools.terminal_tool import cleanup_all_environments
-                cleanup_all_environments()
-            except Exception:
-                pass
-            try:
-                from tools.browser_tool import cleanup_all_browsers
-                cleanup_all_browsers()
-            except Exception:
-                pass
+            # to a specific agent (catch-all for zombie prevention), then signal
+            # the outer start_gateway() wait loop that shutdown is fully complete.
+            self._cleanup_global_tool_resources(wait_for_mcp=True)
+
+            self._shutdown_event.set()
 
             # Close SQLite session DBs so the WAL write lock is released.
             # Without this, --replace and similar restart flows leave the
@@ -11407,12 +11429,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     cron_stop.set()
     cron_thread.join(timeout=5)
 
-    # Close MCP server connections
-    try:
-        from tools.mcp_tool import shutdown_mcp_servers
-        shutdown_mcp_servers()
-    except Exception:
-        pass
+    # runner.stop() performs the final shutdown cleanup before setting
+    # _shutdown_event, so there is nothing left to do here.
 
     if runner.exit_code is not None:
         raise SystemExit(runner.exit_code)
