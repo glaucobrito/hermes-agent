@@ -14,6 +14,13 @@
  *   GET  /chat/:id       - Get chat info
  *   GET  /health         - Health check
  *
+ * Opt-in durable group transport (WHATSAPP_DURABLE_GROUP_IDS; see DURABLE_TRANSPORT.md):
+ *   POST /durable/inbox/claim            - Lease spooled group messages { limit? }
+ *   POST /durable/inbox/ack              - Ack a lease { envelope_id, lease_token }
+ *   POST /send + attempt_id              - Idempotent ledgered send (configured groups only)
+ *   GET  /durable/send/receipt/:attempt  - Read-only send receipt
+ *   Legacy /send (no attempt_id), /edit and /send-media are denied (403) for configured groups.
+ *
  * Usage:
  *   node bridge.js --port 3000 --session ~/.hermes/whatsapp/session
  */
@@ -26,9 +33,12 @@ import path from 'path';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
 import { randomBytes } from 'crypto';
 import { execSync } from 'child_process';
-import { tmpdir } from 'os';
+import { homedir, tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import {
+  createDurableTransport, getContextInfo, getMessageContent, installDurableRoutes, parseDurableConfig, routeUpsertBatch,
+} from './durable-inbox.js';
 
 // Parse CLI args
 const args = process.argv.slice(2);
@@ -67,7 +77,7 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function sendWithTimeout(chatId, payload, timeoutMs = SEND_TIMEOUT_MS) {
+function sendWithTimeout(chatId, payload, options = undefined, timeoutMs = SEND_TIMEOUT_MS) {
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(
@@ -75,7 +85,7 @@ function sendWithTimeout(chatId, payload, timeoutMs = SEND_TIMEOUT_MS) {
       timeoutMs,
     );
   });
-  return Promise.race([sock.sendMessage(chatId, payload), timeoutPromise])
+  return Promise.race([sock.sendMessage(chatId, payload, options), timeoutPromise])
     .finally(() => clearTimeout(timer));
 }
 
@@ -124,28 +134,6 @@ function normalizeWhatsAppId(value) {
   return String(value).replace(':', '@');
 }
 
-function getMessageContent(msg) {
-  const content = msg?.message || {};
-  if (content.ephemeralMessage?.message) return content.ephemeralMessage.message;
-  if (content.viewOnceMessage?.message) return content.viewOnceMessage.message;
-  if (content.viewOnceMessageV2?.message) return content.viewOnceMessageV2.message;
-  if (content.documentWithCaptionMessage?.message) return content.documentWithCaptionMessage.message;
-  if (content.templateMessage?.hydratedTemplate) return content.templateMessage.hydratedTemplate;
-  if (content.buttonsMessage) return content.buttonsMessage;
-  if (content.listMessage) return content.listMessage;
-  return content;
-}
-
-function getContextInfo(messageContent) {
-  if (!messageContent || typeof messageContent !== 'object') return {};
-  for (const value of Object.values(messageContent)) {
-    if (value && typeof value === 'object' && value.contextInfo) {
-      return value.contextInfo;
-    }
-  }
-  return {};
-}
-
 mkdirSync(SESSION_DIR, { recursive: true });
 
 // Build LID → phone reverse map from session files (lid-mapping-{phone}.json)
@@ -177,6 +165,43 @@ const MAX_RECENT_IDS = 50;
 let sock = null;
 let connectionState = 'disconnected';
 
+// #atende:SPEC-licencas-acompanhamento/REQ-R4 REQ-R8 — opt-in durable group transport.
+// Absent WHATSAPP_DURABLE_GROUP_IDS => null (legacy behaviour). Invalid config,
+// unusable spool, failed first-provision fsync or a spool owned by another live
+// bridge process (kernel flock) => refuse to start before any spool clean/load,
+// HTTP listener or WhatsApp connection (fail closed).
+let durable = null;
+try {
+  const durableConfig = parseDurableConfig(process.env, { homeDir: homedir() });
+  if (durableConfig.enabled) {
+    durable = createDurableTransport(durableConfig, {
+      sendMessage: (chatId, payload, options) => sendWithTimeout(chatId, payload, options),
+      isConnected: () => !!sock && connectionState === 'connected',
+      prepareChunks: (message) => splitLongMessage(formatOutgoingMessage(message)),
+      getAccountJid: () => sock?.user?.id,
+      betweenChunks: () => sleep(CHUNK_DELAY_MS),
+      onSent: trackSentMessageId,
+    });
+  }
+} catch (err) {
+  console.error(`❌ Durable WhatsApp transport unavailable — refusing to start: ${err.name}: ${err.message}`);
+  process.exit(1);
+}
+// Timer cleanup + explicit lock release (the kernel also drops the lock on any death).
+process.on('exit', () => durable?.close());
+
+// One durable ingest result (routeUpsertBatch ingests under the emitting socket's account and catches).
+function logDurableInbound(result) {
+  if (result.status === 'ignored' && !WHATSAPP_DEBUG) return;
+  // Sanitized: never message text, JIDs, provider ids or raw error text. A failed spool
+  // write is never reported as persisted and never falls back to the legacy queue;
+  // /health durable.degraded stays true while anything is buffered or was dropped.
+  const { status, reason, envelopeId, code, retained, attempts } = result;
+  const line = JSON.stringify({ event: 'durable_inbound', status, reason, envelope_id: envelopeId, code, retained, attempts });
+  if (status === 'persisted' || status === 'duplicate' || status === 'ignored') console.log(line);
+  else console.error(line);
+}
+
 async function startSocket() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   const { version } = await fetchLatestBaileysVersion();
@@ -197,6 +222,9 @@ async function startSocket() {
       return { conversation: '' };
     },
   });
+  // The socket these listeners belong to. A reconnect replaces the global `sock` while a handler may
+  // still be awaiting, so a batch's account is read from its emitter, never from the global.
+  const emitter = sock;
 
   sock.ev.on('creds.update', () => { saveCreds(); lidToPhone = buildLidMap(); });
 
@@ -246,7 +274,11 @@ async function startSocket() {
       normalizeWhatsAppId(sock.user?.lid),
     ].filter(Boolean)));
 
-    for (const msg of messages) {
+    // Every durable-group message of the batch is spooled right here, synchronously and under the
+    // emitter's account, before the first await (never downloaded, never queued in the destructive
+    // /messages queue), and bypasses every legacy path below; only the other messages, in order,
+    // reach the loop body.
+    for (const msg of routeUpsertBatch(durable, emitter, messages, logDurableInbound)) {
       if (!msg.message) continue;
 
       const chatId = msg.key.remoteJid;
@@ -483,6 +515,12 @@ app.use((req, res, next) => {
   next();
 });
 
+// Durable routes and legacy-route guards. Registered BEFORE the legacy handlers on the
+// same Express paths, so every path variant Express accepts (case, trailing slash) hits
+// the guard first: /send + attempt_id => ledger; legacy /send, /edit, /send-media to a
+// configured group => 403; everything else falls through to the handlers below unchanged.
+installDurableRoutes(app, durable);
+
 // Poll for new messages (long-poll style)
 app.get('/messages', (req, res) => {
   const msgs = messageQueue.splice(0, messageQueue.length);
@@ -700,6 +738,7 @@ app.get('/health', (req, res) => {
     status: connectionState,
     queueLength: messageQueue.length,
     uptime: process.uptime(),
+    durable: durable ? durable.stats() : { enabled: false },
   });
 });
 
