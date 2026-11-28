@@ -1499,6 +1499,28 @@ DEFAULT_CONFIG = {
         "allow_lazy_installs": True,
     },
 
+    # Licenças follow-up: non-secret settings of the CONSUMER (the dedicated
+    # connector). The deterministic barrier for the protected WhatsApp group
+    # (gateway/licencas_followup.py) holds no secret and does not depend on
+    # "enabled": protection comes from the technical manifest
+    # <HERMES_HOME>/licencas/protected-groups.json (+ adoption marker), and a
+    # valid group_jid here stays barred even with enabled=false. Never put a
+    # secret in this section or in .env. The barrier reads the raw config.yaml
+    # of the base profile, so these defaults never switch it on: a file without
+    # the section means "absent".
+    "licencas_followup": {
+        "enabled": False,
+        "group_jid": "",
+        "instance_id": "",
+        "principal_id": "",
+        "policy_id": "",
+        "policy_epoch": 0,
+        "account_binding_hash": "",
+        "key_id": "",
+        "api_url": "",
+        "signed_pathname": "",
+    },
+
     "cron": {
         # Wrap delivered cron responses with a header (task name) and footer
         # ("The agent cannot see this message").  Set to false for clean output.
@@ -2504,6 +2526,27 @@ OPTIONAL_ENV_VARS = {
         "url": "https://api.slack.com/apps",
         "password": True,
         "category": "messaging",
+    },
+    # Licenças follow-up secrets are NOT configured here or in .env, and the
+    # gateway guard (gateway/licencas_followup.py) never reads them: only the
+    # dedicated connector holds credentials, delivered outside this profile.
+    # The names are listed only so the subprocess env blocklist
+    # (tools/environments/local.py) strips them as defense in depth.
+    "LICENCAS_CAPABILITY": {
+        "description": "Do NOT set. Reserved: the Licenças follow-up capability is held only by the dedicated connector, never in .env",
+        "prompt": "Reserved (do not set)",
+        "url": None,
+        "password": True,
+        "category": "messaging",
+        "advanced": True,
+    },
+    "LICENCAS_HMAC_KEY_B64": {
+        "description": "Do NOT set. Reserved: the Licenças follow-up HMAC key is held only by the dedicated connector, never in .env",
+        "prompt": "Reserved (do not set)",
+        "url": None,
+        "password": True,
+        "category": "messaging",
+        "advanced": True,
     },
     "SLACK_APP_TOKEN": {
         "description": "Slack app-level token (xapp-) for Socket Mode. Get from Basic Information → "

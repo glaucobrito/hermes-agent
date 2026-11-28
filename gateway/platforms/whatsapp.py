@@ -179,6 +179,7 @@ def _terminate_bridge_process(proc, *, force: bool = False) -> None:
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from gateway import licencas_followup
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -877,6 +878,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
         Formats markdown for WhatsApp, splits long messages into chunks
         that preserve code block boundaries, and sends each chunk sequentially.
         """
+        if licencas_followup.blocks_outbound(chat_id):
+            return SendResult(success=False, error=licencas_followup.OUTBOUND_REFUSED)
         if not self._running or not self._http_session:
             return SendResult(success=False, error="Not connected")
         bridge_exit = await self._check_managed_bridge_exit()
@@ -935,6 +938,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
         finalize: bool = False,
     ) -> SendResult:
         """Edit a previously sent message via the WhatsApp bridge."""
+        if licencas_followup.blocks_outbound(chat_id):
+            return SendResult(success=False, error=licencas_followup.OUTBOUND_REFUSED)
         if not self._running or not self._http_session:
             return SendResult(success=False, error="Not connected")
         bridge_exit = await self._check_managed_bridge_exit()
@@ -968,6 +973,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
         file_name: Optional[str] = None,
     ) -> SendResult:
         """Send any media file via bridge /send-media endpoint."""
+        if licencas_followup.blocks_outbound(chat_id):
+            return SendResult(success=False, error=licencas_followup.OUTBOUND_REFUSED)
         if not self._running or not self._http_session:
             return SendResult(success=False, error="Not connected")
         bridge_exit = await self._check_managed_bridge_exit()
@@ -1016,6 +1023,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
     ) -> SendResult:
         """Download image URL to cache, send natively via bridge."""
+        if licencas_followup.blocks_outbound(chat_id):
+            return SendResult(success=False, error=licencas_followup.OUTBOUND_REFUSED)
         try:
             local_path = await cache_image_from_url(image_url)
             return await self._send_media_to_bridge(chat_id, local_path, "image", caption)
@@ -1072,6 +1081,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Send typing indicator via bridge."""
+        if licencas_followup.blocks_outbound(chat_id):
+            return
         if not self._running or not self._http_session:
             return
         if await self._check_managed_bridge_exit():
@@ -1137,6 +1148,10 @@ class WhatsAppAdapter(BasePlatformAdapter):
                     if resp.status == 200:
                         messages = await resp.json()
                         for msg_data in messages:
+                            # Licenças: o grupo protegido não entra pelo caminho
+                            # legado; barrado antes de montar evento, mídia e cache.
+                            if licencas_followup.blocks_bridge_message(msg_data):
+                                continue
                             event = await self._build_message_event(msg_data)
                             if event:
                                 await self.handle_message(event)
@@ -1152,6 +1167,12 @@ class WhatsAppAdapter(BasePlatformAdapter):
             
             await asyncio.sleep(1)  # Poll interval
     
+    async def handle_message(self, event: MessageEvent) -> None:
+        """Recusa evento do grupo protegido de Licenças antes da fila e da sessão do adapter."""
+        if licencas_followup.blocks_event(event, licencas_followup.BlockKind.INBOUND_EVENT):
+            return
+        await super().handle_message(event)
+
     async def _build_message_event(self, data: Dict[str, Any]) -> Optional[MessageEvent]:
         """Build a MessageEvent from bridge message data, downloading images to cache."""
         try:

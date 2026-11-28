@@ -811,6 +811,7 @@ from gateway.session import (
     is_shared_multi_user_session,
 )
 from gateway.delivery import DeliveryRouter
+from gateway import licencas_followup
 from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
@@ -1424,6 +1425,9 @@ class GatewayRunner:
 
     def __init__(self, config: Optional[GatewayConfig] = None):
         global _gateway_runner_ref
+        # Licenças: a guarda do grupo protegido é lida do perfil base deste processo
+        # aqui, antes de adapters, cron e qualquer envio.
+        licencas_followup.current_guard()
         self.config = config or load_gateway_config()
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
         self._warn_if_docker_media_delivery_is_risky()
@@ -2839,6 +2843,10 @@ class GatewayRunner:
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+        # Licenças: grupo protegido não entra em sessão ativa (mesma barreira de _handle_message).
+        if licencas_followup.blocks_event(event, licencas_followup.BlockKind.DISPATCH):
+            return True
+
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
         # creating a session.  The busy path must enforce the same check;
@@ -6429,6 +6437,12 @@ class GatewayRunner:
         6. Run agent conversation
         7. Return response
         """
+        # Licenças: barreira determinística do grupo protegido, antes de hooks de
+        # plugin, autorização, comandos e sessão. Vale para qualquer plataforma e
+        # para evento interno; erro na barreira também bloqueia (falha fechada).
+        if licencas_followup.blocks_event(event, licencas_followup.BlockKind.DISPATCH):
+            return None
+
         source = event.source
 
         # Internal events (e.g. background-process completion notifications)
