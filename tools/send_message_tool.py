@@ -1060,6 +1060,12 @@ async def _send_slack(token, chat_id, message):
 
 async def _send_whatsapp(extra, chat_id, message):
     """Send via the local WhatsApp bridge HTTP API."""
+    # Licenças: este caminho fala direto com a bridge, sem o adapter; o grupo
+    # protegido é recusado aqui também (erro na barreira = recusa).
+    from gateway import licencas_followup
+
+    if licencas_followup.blocks_outbound(chat_id):
+        return _error(licencas_followup.OUTBOUND_REFUSED)
     try:
         import aiohttp
     except ImportError:
