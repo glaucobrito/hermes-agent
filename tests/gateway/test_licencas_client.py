@@ -22,6 +22,7 @@ import subprocess
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -50,6 +51,33 @@ ENV = {
     "LICENCAS_POLICY_EPOCH": "3",
     "LICENCAS_ACCOUNT_BINDING_HASH": BINDING_HASH,
 }
+
+SECRET_NAMES = ("LICENCAS_CAPABILITY", "LICENCAS_HMAC_KEY_B64")
+SECRETS = {name: ENV[name] for name in SECRET_NAMES}
+YAML_SECTION: dict[str, object] = {
+    "enabled": False,
+    "api_url": ENV["LICENCAS_API_URL"],
+    "signed_pathname": ENV["LICENCAS_API_SIGNED_PATHNAME"],
+    "key_id": ENV["LICENCAS_KEY_ID"],
+    "principal_id": ENV["LICENCAS_PRINCIPAL_ID"],
+    "instance_id": INSTANCE_ID,
+    "policy_id": POLICY_ID,
+    "group_jid": GROUP_JID,
+    "policy_epoch": 3,
+    "account_binding_hash": BINDING_HASH,
+}
+YAML_REQUIRED = tuple(name for name in YAML_SECTION if name != "enabled")
+
+
+#: Raiz bruta sintética do config.yaml: as fixtures não dependem do disco.
+RAW_CONFIG: dict[str, object] = {"licencas_followup": dict(YAML_SECTION)}
+
+
+def load_config(
+    read: Callable[[str], str | None] = SECRETS.get,
+) -> lc.LicencasClientConfig:
+    return lc.load_licencas_config(read, raw_config=RAW_CONFIG)
+
 
 ACTOR_JID = "5511988887777@s.whatsapp.net"
 OWNER_JID = "5511977776666@s.whatsapp.net"
@@ -566,18 +594,18 @@ def make_client(
     recorder: Recorder, clock: Callable[[], float] = lambda: float(NOW)
 ) -> lc.LicencasClient:
     return lc.LicencasClient(
-        lc.load_licencas_config(ENV.get),
+        load_config(),
         transport=httpx.MockTransport(recorder),
         clock=clock,
     )
 
 
 def env_without(name: str) -> Callable[[str], str | None]:
-    return {key: value for key, value in ENV.items() if key != name}.get
+    return {key: value for key, value in SECRETS.items() if key != name}.get
 
 
 def env_with(**overrides: str) -> Callable[[str], str | None]:
-    return {**ENV, **overrides}.get
+    return {**SECRETS, **overrides}.get
 
 
 # ---------------------------------------------------------------- assinatura
@@ -1399,15 +1427,16 @@ async def test_largest_accepted_body_is_exactly_16_kib() -> None:
 # ---------------------------------------------------------------- configuração (falha fechada)
 
 
-def test_config_loads_from_reader_into_closed_type() -> None:
-    config = lc.load_licencas_config(ENV.get)
+def test_config_loads_into_closed_type() -> None:
+    config = load_config()
     assert dataclasses.is_dataclass(config) and config.__dataclass_params__.frozen
     assert (
         config.endpoint == ENV["LICENCAS_API_URL"]
         and config.signed_pathname == "/licencas-api"
     )
     assert config.hmac_key == HMAC_KEY and config.policy_epoch == 3
-    assert set(lc.LICENCAS_ENV_NAMES) == set(ENV)
+    assert set(lc.LICENCAS_SECRET_ENV_NAMES) == set(SECRETS)
+    assert set(lc.LICENCAS_YAML_KEYS) == set(YAML_REQUIRED)
     shown = repr(config)
     assert (
         CAPABILITY not in shown
@@ -1416,13 +1445,24 @@ def test_config_loads_from_reader_into_closed_type() -> None:
     )
 
 
-@pytest.mark.parametrize("name", sorted(ENV))
-def test_missing_or_empty_variable_fails_closed(name: str) -> None:
+@pytest.mark.parametrize("name", sorted(SECRETS))
+def test_missing_or_empty_secret_fails_closed(name: str) -> None:
     for reader in (env_without(name), env_with(**{name: ""})):
         with pytest.raises(lc.LicencasConfigError) as caught:
-            lc.LicencasClient.from_env(reader)
+            lc.LicencasClient.from_env(reader, raw_config=RAW_CONFIG)
         assert caught.value.field == name
         assert ENV[name] not in str(caught.value)
+
+
+_YAML_OF = {
+    "LICENCAS_API_URL": "api_url",
+    "LICENCAS_API_SIGNED_PATHNAME": "signed_pathname",
+    "LICENCAS_KEY_ID": "key_id",
+    "LICENCAS_INSTANCE_ID": "instance_id",
+    "LICENCAS_POLICY_ID": "policy_id",
+    "LICENCAS_GROUP_JID": "group_jid",
+    "LICENCAS_ACCOUNT_BINDING_HASH": "account_binding_hash",
+}
 
 
 @pytest.mark.parametrize(
@@ -1446,6 +1486,25 @@ def test_missing_or_empty_variable_fails_closed(name: str) -> None:
         ("LICENCAS_API_URL", "https://licencas.invalid:0/licencas-api"),
         ("LICENCAS_API_SIGNED_PATHNAME", "licencas-api"),
         ("LICENCAS_API_SIGNED_PATHNAME", "/licencas-api?x=1"),
+        ("LICENCAS_KEY_ID", "tem espaço"),
+        ("LICENCAS_INSTANCE_ID", "sem-arroba"),
+        ("LICENCAS_POLICY_ID", POLICY_ID.upper()),
+        ("LICENCAS_GROUP_JID", "5511999990000@s.whatsapp.net"),
+        ("LICENCAS_ACCOUNT_BINDING_HASH", "AB" * 32),
+    ],
+)
+def test_invalid_public_option_fails_closed(name: str, value: str) -> None:
+    key = _YAML_OF[name]
+    raw = {"licencas_followup": {**YAML_SECTION, key: value}}
+    with pytest.raises(lc.LicencasConfigError) as caught:
+        lc.load_licencas_config(SECRETS.get, raw_config=raw)
+    assert caught.value.field == key
+    assert value not in str(caught.value) or value == ""
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
         ("LICENCAS_CAPABILITY", "curta"),
         ("LICENCAS_CAPABILITY", "eyJ" + "a" * 40),
         ("LICENCAS_CAPABILITY", "aaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbb.cccccccccccccccc"),
@@ -1454,25 +1513,17 @@ def test_missing_or_empty_variable_fails_closed(name: str) -> None:
         ("LICENCAS_HMAC_KEY_B64", base64.b64encode(bytes(129)).decode("ascii")),
         ("LICENCAS_HMAC_KEY_B64", "não-é-base64"),
         ("LICENCAS_HMAC_KEY_B64", ENV["LICENCAS_HMAC_KEY_B64"] + "\n"),
-        ("LICENCAS_KEY_ID", "tem espaço"),
-        ("LICENCAS_INSTANCE_ID", "sem-arroba"),
-        ("LICENCAS_POLICY_ID", POLICY_ID.upper()),
-        ("LICENCAS_GROUP_JID", "5511999990000@s.whatsapp.net"),
-        ("LICENCAS_POLICY_EPOCH", "0"),
-        ("LICENCAS_POLICY_EPOCH", "3.0"),
-        ("LICENCAS_POLICY_EPOCH", "9" * 16),
-        ("LICENCAS_ACCOUNT_BINDING_HASH", "AB" * 32),
     ],
 )
-def test_invalid_configuration_fails_closed(name: str, value: str) -> None:
+def test_invalid_secret_fails_closed(name: str, value: str) -> None:
     with pytest.raises(lc.LicencasConfigError) as caught:
-        lc.load_licencas_config(env_with(**{name: value}))
+        load_config(env_with(**{name: value}))
     assert caught.value.field == name
     assert value not in str(caught.value) or value == ""
 
 
 def test_config_type_validates_direct_construction() -> None:
-    config = lc.load_licencas_config(ENV.get)
+    config = load_config()
     with pytest.raises(lc.LicencasConfigError):
         dataclasses.replace(config, endpoint="http://127.0.0.1:8787/licencas-api")
     with pytest.raises(lc.LicencasConfigError):
@@ -1482,13 +1533,257 @@ def test_config_type_validates_direct_construction() -> None:
 def test_default_reader_is_the_process_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in ENV:
+    for name in SECRETS:
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(lc.LicencasConfigError):
-        lc.LicencasClient.from_env()
-    for name, value in ENV.items():
+        lc.LicencasClient.from_env(raw_config=RAW_CONFIG)
+    for name, value in SECRETS.items():
         monkeypatch.setenv(name, value)
-    assert lc.load_licencas_config() == lc.load_licencas_config(ENV.get)
+    assert lc.load_licencas_config(raw_config=RAW_CONFIG) == load_config()
+
+
+# ---------------------------------------------------------------- configuração a partir do config.yaml real
+
+
+def section_text(**changes: object) -> str:
+    section = {**YAML_SECTION, **changes}
+    lines = [f"  {key}: {json.dumps(value)}" for key, value in section.items()]
+    return "licencas_followup:\n" + "\n".join(lines) + "\n"
+
+
+class SecretsSpy:
+    """Leitor injetado: só os dois segredos existem; qualquer outro nome é registrado e falha."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def __call__(self, name: str) -> str | None:
+        self.asked.append(name)
+        return SECRETS.get(name)
+
+
+@pytest.fixture
+def base_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    return home
+
+
+def write_config(home: Path, text: str) -> None:
+    (home / "config.yaml").write_text(text, encoding="utf-8")
+
+
+def test_loader_reads_the_real_config_yaml_and_only_the_two_secrets(
+    base_home: Path,
+) -> None:
+    write_config(base_home, section_text())
+    spy = SecretsSpy()
+    config = lc.load_licencas_config(spy)
+    assert config == load_config()
+    assert sorted(spy.asked) == sorted(SECRET_NAMES)
+
+
+def test_from_env_reads_yaml_even_with_conflicting_environment(
+    base_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_config(base_home, section_text())
+    for name in ENV:
+        if name not in SECRET_NAMES:
+            monkeypatch.setenv(name, "https://conflito.invalid/outro")
+    for name, value in SECRETS.items():
+        monkeypatch.setenv(name, value)
+    for reader in (SecretsSpy(), os.environ.get):
+        client = lc.LicencasClient.from_env(reader)
+        assert client._config == load_config()
+
+
+@pytest.mark.parametrize("name", YAML_REQUIRED)
+def test_yaml_missing_or_empty_option_fails_before_credentials(
+    base_home: Path, name: str
+) -> None:
+    section = {k: v for k, v in YAML_SECTION.items() if k != name}
+    for raw in (section, {**section, name: ""}, {**section, name: None}):
+        spy = SecretsSpy()
+        with pytest.raises(lc.LicencasConfigError) as caught:
+            lc.load_licencas_config(spy, raw_config={"licencas_followup": raw})
+        assert caught.value.field == name
+        assert spy.asked == []
+
+
+@pytest.mark.parametrize(
+    "epoch", [True, False, "3", 3.0, 0, -1, 2**53, None, [3], {"a": 3}]
+)
+def test_yaml_policy_epoch_must_be_a_strict_int(epoch: object) -> None:
+    spy = SecretsSpy()
+    raw = {"licencas_followup": {**YAML_SECTION, "policy_epoch": epoch}}
+    with pytest.raises(lc.LicencasConfigError) as caught:
+        lc.load_licencas_config(spy, raw_config=raw)
+    assert caught.value.field == "policy_epoch" and spy.asked == []
+
+
+def test_yaml_policy_epoch_accepts_the_range_edges() -> None:
+    for epoch in (1, lc.MAX_SAFE_INTEGER):
+        raw = {"licencas_followup": {**YAML_SECTION, "policy_epoch": epoch}}
+        assert (
+            lc.load_licencas_config(SecretsSpy(), raw_config=raw).policy_epoch == epoch
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "bad"),
+    [
+        ("api_url", "http://licencas.invalid/licencas-api"),
+        ("api_url", 7),
+        ("signed_pathname", "licencas-api"),
+        ("key_id", "tem espaço"),
+        ("principal_id", ["x"]),
+        ("instance_id", "sem-arroba"),
+        ("policy_id", POLICY_ID.upper()),
+        ("group_jid", "5511999990000@s.whatsapp.net"),
+        ("account_binding_hash", "AB" * 32),
+        ("enabled", "yes"),
+    ],
+)
+def test_yaml_values_keep_every_existing_validator(key: str, bad: object) -> None:
+    spy = SecretsSpy()
+    with pytest.raises(lc.LicencasConfigError) as caught:
+        lc.load_licencas_config(
+            spy, raw_config={"licencas_followup": {**YAML_SECTION, key: bad}}
+        )
+    assert caught.value.field == key and spy.asked == []
+    assert str(bad) not in str(caught.value) or str(bad) == key
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, [], "texto", 3, {}, {"licencas_followup": None}, {"licencas_followup": []}],
+)
+def test_invalid_raw_config_structure_fails_closed(raw: object) -> None:
+    spy = SecretsSpy()
+    with pytest.raises(lc.LicencasConfigError):
+        lc.load_licencas_config(spy, raw_config=raw)
+    assert spy.asked == []
+
+
+def test_explicit_none_raw_config_never_falls_back_to_disk(base_home: Path) -> None:
+    write_config(base_home, section_text())
+    with pytest.raises(lc.LicencasConfigError):
+        lc.load_licencas_config(SecretsSpy(), raw_config=None)
+
+
+def test_raw_config_injection_does_not_touch_the_disk(base_home: Path) -> None:
+    write_config(base_home, "licencas_followup: [yaml quebrado\n")
+    config = lc.load_licencas_config(
+        SecretsSpy(), raw_config={"licencas_followup": dict(YAML_SECTION)}
+    )
+    assert config == load_config()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "licencas_followup: [yaml quebrado\n",
+        section_text() + section_text(),
+        section_text().replace("  key_id", "  principal_id: dup\n  key_id", 1),
+        "base: &a\n  key_id: k1\nlicencas_followup:\n  <<: *a\n  api_url: x\n",
+        "x: &s\n  group_jid: '1'\nlicencas_followup: *s\n",
+        "- lista\n- na raiz\n",
+        "",
+    ],
+)
+def test_yaml_file_that_is_not_one_explicit_section_fails_closed(
+    base_home: Path, text: str
+) -> None:
+    write_config(base_home, text)
+    spy = SecretsSpy()
+    with pytest.raises(lc.LicencasConfigError):
+        lc.load_licencas_config(spy)
+    assert spy.asked == []
+
+
+def test_missing_config_file_and_io_error_fail_closed(base_home: Path) -> None:
+    spy = SecretsSpy()
+    with pytest.raises(lc.LicencasConfigError):
+        lc.load_licencas_config(spy)
+    (base_home / "config.yaml").mkdir()
+    with pytest.raises(lc.LicencasConfigError):
+        lc.load_licencas_config(spy)
+    assert spy.asked == []
+
+
+def test_base_profile_ignores_a_context_override(
+    base_home: Path, tmp_path: Path
+) -> None:
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    write_config(base_home, section_text())
+    other = tmp_path / "outro-perfil"
+    other.mkdir()
+    write_config(other, section_text(key_id="outro"))
+    token = set_hermes_home_override(other)
+    try:
+        assert lc.load_licencas_config(SecretsSpy()).key_id == "k1"
+    finally:
+        reset_hermes_home_override(token)
+
+
+@pytest.mark.parametrize(
+    "key", ["capability", "hmac_key", "HMAC_KEY_B64", "licencas_capability"]
+)
+def test_secret_key_in_yaml_is_refused_without_echoing_it(key: str) -> None:
+    spy = SecretsSpy()
+    raw = {"licencas_followup": {**YAML_SECTION, key: "valor-secreto-sintetico"}}
+    with pytest.raises(lc.LicencasConfigError) as caught:
+        lc.load_licencas_config(spy, raw_config=raw)
+    assert caught.value.field == "secret_in_config" and spy.asked == []
+    assert "valor-secreto-sintetico" not in str(caught.value)
+
+
+def test_unknown_yaml_key_is_refused() -> None:
+    raw = {"licencas_followup": {**YAML_SECTION, "outra": "x"}}
+    with pytest.raises(lc.LicencasConfigError):
+        lc.load_licencas_config(SecretsSpy(), raw_config=raw)
+
+
+@pytest.mark.parametrize("name", SECRET_NAMES)
+def test_credential_reader_failures_are_sanitized(name: str) -> None:
+    raw = {"licencas_followup": dict(YAML_SECTION)}
+
+    def exploding(_name: str) -> str | None:
+        raise RuntimeError("segredo-no-erro-sintetico")
+
+    cases: list[Callable[[str], object]] = [
+        exploding,
+        lambda n: 123 if n == name else SECRETS[n],
+        lambda n: None if n == name else SECRETS[n],
+        lambda n: "" if n == name else SECRETS[n],
+    ]
+    for reader in cases:
+        with pytest.raises(lc.LicencasConfigError) as caught:
+            lc.load_licencas_config(
+                cast(Callable[[str], str | None], reader), raw_config=raw
+            )
+        error = caught.value
+        assert error.__cause__ is None and error.__context__ is None
+        assert "segredo-no-erro-sintetico" not in str(error) + repr(error.args)
+        assert error.field in SECRET_NAMES
+
+
+def test_config_errors_and_logs_never_carry_public_values(
+    base_home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    write_config(
+        base_home, section_text(api_url="http://licencas.invalid/licencas-api")
+    )
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(lc.LicencasConfigError) as caught,
+    ):
+        lc.load_licencas_config(SecretsSpy())
+    shown = str(caught.value) + caplog.text
+    for value in (GROUP_JID, INSTANCE_ID, BINDING_HASH, "licencas.invalid"):
+        assert value not in shown
 
 
 # ---------------------------------------------------------------- transporte
@@ -1496,7 +1791,7 @@ def test_default_reader_is_the_process_environment(
 
 @aio
 async def test_http_client_is_locked_down() -> None:
-    client = lc.LicencasClient(lc.load_licencas_config(ENV.get))
+    client = lc.LicencasClient(load_config())
     try:
         http = client._http
         assert http.follow_redirects is False
@@ -1519,7 +1814,7 @@ async def test_http_client_is_locked_down() -> None:
 async def test_proxy_environment_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
     monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid:3128")
-    client = lc.LicencasClient(lc.load_licencas_config(ENV.get))
+    client = lc.LicencasClient(load_config())
     try:
         assert client._http._mounts == {}
     finally:
@@ -1529,7 +1824,7 @@ async def test_proxy_environment_is_ignored(monkeypatch: pytest.MonkeyPatch) -> 
 @aio
 async def test_loopback_only_through_explicit_test_parameter() -> None:
     recorder = replying(200, BY_NAME["claimDue"].reply)
-    config = lc.load_licencas_config(ENV.get)
+    config = load_config()
     client = lc.LicencasClient(
         config,
         transport=httpx.MockTransport(recorder),
@@ -1541,13 +1836,14 @@ async def test_loopback_only_through_explicit_test_parameter() -> None:
     assert str(recorder.requests[0].url) == "http://127.0.0.1:18787/licencas-api"
     # Nenhum nome de variável de ambiente nem campo de configuração leva ao loopback.
     assert not any(
-        "LOOPBACK" in name or "TEST" in name for name in lc.LICENCAS_ENV_NAMES
+        "LOOPBACK" in name or "TEST" in name
+        for name in (*lc.LICENCAS_SECRET_ENV_NAMES, *lc.LICENCAS_YAML_KEYS)
     )
     assert "loopback_test_port" not in {
         field.name for field in dataclasses.fields(config)
     }
     with pytest.raises(TypeError):
-        lc.LicencasClient.from_env(ENV.get, loopback_test_port=18787)
+        lc.LicencasClient.from_env(SECRETS.get, loopback_test_port=18787)
     for port in (0, 70000, True, "8787"):
         with pytest.raises(lc.LicencasConfigError):
             lc.LicencasClient(config, loopback_test_port=port)

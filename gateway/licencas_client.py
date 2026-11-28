@@ -14,6 +14,10 @@ Regras deste módulo:
   texto, token, JID, telefone, IDs de mensagem ou hash.
 * Importar não faz nada: sem leitura de ambiente, arquivo ou rede. A
   configuração só é lida quando ``load_licencas_config`` é chamada.
+* Configuração: as nove opções NÃO secretas vêm só da seção ``licencas_followup`` do
+  ``config.yaml`` do perfil base (sem fallback para o ambiente). O leitor injetado, que por
+  padrão é ``os.environ.get``, é consultado somente para ``LICENCAS_CAPABILITY`` e
+  ``LICENCAS_HMAC_KEY_B64``, e só depois de as opções públicas serem validadas.
 """
 
 from __future__ import annotations
@@ -34,10 +38,18 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar, DefaultCookiePolicy
-from typing import ClassVar, Generic, NoReturn, TypeVar
+from typing import ClassVar, Generic, NoReturn, TypeVar, cast
 from urllib.parse import urlsplit
 
 import httpx
+
+# Leitor estrito do ``config.yaml`` do perfil base e política de chaves secretas da guarda.
+# Sentido único: o cliente importa o leitor; a guarda nunca importa o cliente.
+from gateway.licencas_followup import (
+    _SECRET_SECTION_KEYS,
+    CONFIG_SECTION,
+    _read_config_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,21 +80,34 @@ OPERATIONS: Mapping[str, str] = {
     "confirmReceipt": "worker",
 }
 
-_ENV_TO_FIELD: Mapping[str, str] = {
-    "LICENCAS_API_URL": "endpoint",
-    "LICENCAS_API_SIGNED_PATHNAME": "signed_pathname",
-    "LICENCAS_CAPABILITY": "capability",
-    "LICENCAS_HMAC_KEY_B64": "hmac_key",
-    "LICENCAS_KEY_ID": "key_id",
-    "LICENCAS_PRINCIPAL_ID": "principal_id",
-    "LICENCAS_INSTANCE_ID": "instance_id",
-    "LICENCAS_POLICY_ID": "policy_id",
-    "LICENCAS_GROUP_JID": "group_jid",
-    "LICENCAS_POLICY_EPOCH": "policy_epoch",
-    "LICENCAS_ACCOUNT_BINDING_HASH": "account_binding_hash",
+#: Chave do ``config.yaml`` (seção ``licencas_followup``) -> campo da configuração.
+_YAML_TO_FIELD: Mapping[str, str] = {
+    "api_url": "endpoint",
+    "signed_pathname": "signed_pathname",
+    "key_id": "key_id",
+    "principal_id": "principal_id",
+    "instance_id": "instance_id",
+    "policy_id": "policy_id",
+    "group_jid": "group_jid",
+    "policy_epoch": "policy_epoch",
+    "account_binding_hash": "account_binding_hash",
 }
-#: Variáveis de ambiente obrigatórias (todas; não há valor padrão para nenhuma).
-LICENCAS_ENV_NAMES: tuple[str, ...] = tuple(_ENV_TO_FIELD)
+_FIELD_TO_YAML: Mapping[str, str] = {
+    field: key for key, field in _YAML_TO_FIELD.items()
+}
+#: Opções públicas obrigatórias do ``config.yaml`` (nenhuma tem valor padrão).
+LICENCAS_YAML_KEYS: tuple[str, ...] = tuple(_YAML_TO_FIELD)
+#: Únicas variáveis consultadas no leitor de credenciais.
+LICENCAS_SECRET_ENV_NAMES: tuple[str, ...] = (
+    "LICENCAS_CAPABILITY",
+    "LICENCAS_HMAC_KEY_B64",
+)
+_SECRET_FIELD_TO_ENV: Mapping[str, str] = {
+    "capability": "LICENCAS_CAPABILITY",
+    "hmac_key": "LICENCAS_HMAC_KEY_B64",
+}
+_ENABLED_KEY = "enabled"
+_FROM_DISK: object = object()
 
 # Formatos fechados, cópia dos da Edge (contract.ts); sempre usados com fullmatch.
 _UUID = re.compile(
@@ -509,34 +534,51 @@ class LicencasClientConfig:
     account_binding_hash: str
 
     def __post_init__(self) -> None:
-        def need(name: str, pattern: re.Pattern[str]) -> str:
-            value = getattr(self, name)
-            if not isinstance(value, str) or pattern.fullmatch(value) is None:
-                raise LicencasConfigError(name)
-            return value
-
-        pathname = need("signed_pathname", _PATHNAME)
-        _check_endpoint(self.endpoint, pathname)
-        capability = need("capability", _CAPABILITY)
+        _check_public_fields({
+            "endpoint": self.endpoint,
+            "signed_pathname": self.signed_pathname,
+            "key_id": self.key_id,
+            "principal_id": self.principal_id,
+            "instance_id": self.instance_id,
+            "policy_id": self.policy_id,
+            "group_jid": self.group_jid,
+            "policy_epoch": self.policy_epoch,
+            "account_binding_hash": self.account_binding_hash,
+        })
+        if not isinstance(self.capability, str) or (
+            _CAPABILITY.fullmatch(self.capability) is None
+        ):
+            raise LicencasConfigError("capability")
         # A capability não é credencial de plataforma: forma de JWT ou de chave de API é recusada.
         if (
-            capability.startswith(("eyJ", "sb_"))
-            or _JWT_SHAPE.fullmatch(capability) is not None
+            self.capability.startswith(("eyJ", "sb_"))
+            or _JWT_SHAPE.fullmatch(self.capability) is not None
         ):
             raise LicencasConfigError("capability")
         if not isinstance(self.hmac_key, bytes) or not 32 <= len(self.hmac_key) <= 128:
             raise LicencasConfigError("hmac_key")
-        need("key_id", _TOKEN_ID)
-        need("principal_id", _TOKEN_ID)
-        need("instance_id", _ACCOUNT_JID)
-        need("policy_id", _UUID)
-        need("group_jid", _GROUP_JID)
-        if (
-            type(self.policy_epoch) is not int
-            or not 1 <= self.policy_epoch <= MAX_SAFE_INTEGER
-        ):
-            raise LicencasConfigError("policy_epoch")
-        need("account_binding_hash", _HEX64)
+
+
+def _check_public_fields(values: Mapping[str, object]) -> None:
+    """Valida as nove opções não secretas (nome do campo no erro, nunca o valor)."""
+
+    def need(name: str, pattern: re.Pattern[str]) -> str:
+        value = values[name]
+        if not isinstance(value, str) or pattern.fullmatch(value) is None:
+            raise LicencasConfigError(name)
+        return value
+
+    pathname = need("signed_pathname", _PATHNAME)
+    _check_endpoint(values["endpoint"], pathname)
+    need("key_id", _TOKEN_ID)
+    need("principal_id", _TOKEN_ID)
+    need("instance_id", _ACCOUNT_JID)
+    need("policy_id", _UUID)
+    need("group_jid", _GROUP_JID)
+    epoch = values["policy_epoch"]
+    if type(epoch) is not int or not 1 <= epoch <= MAX_SAFE_INTEGER:
+        raise LicencasConfigError("policy_epoch")
+    need("account_binding_hash", _HEX64)
 
 
 def _check_endpoint(endpoint: object, signed_pathname: str) -> None:
@@ -561,17 +603,68 @@ def _check_endpoint(endpoint: object, signed_pathname: str) -> None:
         raise LicencasConfigError("endpoint")
 
 
+def _section_settings(raw_config: object) -> dict[str, object]:
+    """Nove opções públicas da seção ``licencas_followup``; o YAML manda e nada as completa."""
+    if raw_config is _FROM_DISK:
+        failed = False
+        # IO, YAML inválido/ambíguo ou recursão: tudo vira erro tipado, sem causa nem contexto.
+        try:
+            raw_config = _read_config_file()
+        except Exception:
+            failed = True
+        if failed:
+            raise LicencasConfigError("config_yaml")
+    if not isinstance(raw_config, Mapping):
+        raise LicencasConfigError("config_root")
+    section = raw_config.get(CONFIG_SECTION)
+    if not isinstance(section, Mapping):
+        raise LicencasConfigError(CONFIG_SECTION)
+    for key in section:
+        if isinstance(key, str) and key.lower() in _SECRET_SECTION_KEYS:
+            raise LicencasConfigError("secret_in_config")
+    for key in section:
+        if not isinstance(key, str) or (
+            key not in _YAML_TO_FIELD and key != _ENABLED_KEY
+        ):
+            raise LicencasConfigError("unexpected_key")
+    if _ENABLED_KEY in section and type(section[_ENABLED_KEY]) is not bool:
+        raise LicencasConfigError(_ENABLED_KEY)
+    settings = {field: section.get(key) for key, field in _YAML_TO_FIELD.items()}
+    try:
+        _check_public_fields(settings)
+    except LicencasConfigError as error:
+        raise LicencasConfigError(_FIELD_TO_YAML[error.field]) from None
+    return settings
+
+
+def _read_secret(read: Callable[[str], str | None], name: str) -> str:
+    failed = False
+    value: object = None
+    try:
+        value = read(name)
+    except Exception:  # o leitor é externo: a exceção dele pode carregar o segredo
+        failed = True
+    if failed or not isinstance(value, str) or value == "":
+        raise LicencasConfigError(name)
+    return value
+
+
 def load_licencas_config(
     read: Callable[[str], str | None] = os.environ.get,
+    *,
+    raw_config: object = _FROM_DISK,
 ) -> LicencasClientConfig:
-    """Lê as 11 variáveis; qualquer ausência ou forma inválida levanta ``LicencasConfigError`` com o nome dela."""
-    values: dict[str, str] = {}
-    for name in LICENCAS_ENV_NAMES:
-        value = read(name)
-        if value is None or value == "":
-            raise LicencasConfigError(name)
-        values[name] = value
-    key_text = values["LICENCAS_HMAC_KEY_B64"]
+    """Opções públicas do ``config.yaml``; capability e chave HMAC do leitor ``read``.
+
+    ``raw_config`` (raiz bruta do YAML) é injeção opcional: omitido, lê o ``config.yaml`` do
+    perfil base; ``None`` explícito é inválido. As opções públicas são validadas antes de
+    qualquer credencial ser lida; ausência ou forma inválida levanta ``LicencasConfigError``
+    com o nome do campo ou um código fixo, nunca com o valor. O padrão ``os.environ.get`` é só
+    compatibilidade: ele é consultado apenas para os dois segredos.
+    """
+    settings = _section_settings(raw_config)
+    capability = _read_secret(read, "LICENCAS_CAPABILITY")
+    key_text = _read_secret(read, "LICENCAS_HMAC_KEY_B64")
     try:
         hmac_key = (
             base64.b64decode(key_text, validate=True)
@@ -582,25 +675,22 @@ def load_licencas_config(
         raise LicencasConfigError("LICENCAS_HMAC_KEY_B64") from None
     if base64.b64encode(hmac_key).decode("ascii") != key_text:
         raise LicencasConfigError("LICENCAS_HMAC_KEY_B64")
-    if _EPOCH.fullmatch(values["LICENCAS_POLICY_EPOCH"]) is None:
-        raise LicencasConfigError("LICENCAS_POLICY_EPOCH")
     try:
         return LicencasClientConfig(
-            endpoint=values["LICENCAS_API_URL"],
-            signed_pathname=values["LICENCAS_API_SIGNED_PATHNAME"],
-            capability=values["LICENCAS_CAPABILITY"],
+            endpoint=cast(str, settings["endpoint"]),
+            signed_pathname=cast(str, settings["signed_pathname"]),
+            capability=capability,
             hmac_key=hmac_key,
-            key_id=values["LICENCAS_KEY_ID"],
-            principal_id=values["LICENCAS_PRINCIPAL_ID"],
-            instance_id=values["LICENCAS_INSTANCE_ID"],
-            policy_id=values["LICENCAS_POLICY_ID"],
-            group_jid=values["LICENCAS_GROUP_JID"],
-            policy_epoch=int(values["LICENCAS_POLICY_EPOCH"]),
-            account_binding_hash=values["LICENCAS_ACCOUNT_BINDING_HASH"],
+            key_id=cast(str, settings["key_id"]),
+            principal_id=cast(str, settings["principal_id"]),
+            instance_id=cast(str, settings["instance_id"]),
+            policy_id=cast(str, settings["policy_id"]),
+            group_jid=cast(str, settings["group_jid"]),
+            policy_epoch=cast(int, settings["policy_epoch"]),
+            account_binding_hash=cast(str, settings["account_binding_hash"]),
         )
     except LicencasConfigError as error:
-        by_field = {attribute: name for name, attribute in _ENV_TO_FIELD.items()}
-        raise LicencasConfigError(by_field[error.field]) from None
+        raise LicencasConfigError(_SECRET_FIELD_TO_ENV[error.field]) from None
 
 
 # ---------------------------------------------------------------- entradas (transporte trusted)
@@ -1208,10 +1298,16 @@ class LicencasClient:
 
     @classmethod
     def from_env(
-        cls, read: Callable[[str], str | None] = os.environ.get
+        cls,
+        read: Callable[[str], str | None] = os.environ.get,
+        *,
+        raw_config: object = _FROM_DISK,
     ) -> LicencasClient:
-        """Caminho de produção: configuração completa do ambiente ou nenhum cliente."""
-        return cls(load_licencas_config(read))
+        """Caminho de produção: ``config.yaml`` + dois segredos de ``read``, ou nenhum cliente.
+
+        O nome ``from_env`` é histórico: o ambiente só fornece os dois segredos.
+        """
+        return cls(load_licencas_config(read, raw_config=raw_config))
 
     async def aclose(self) -> None:
         await self._http.aclose()

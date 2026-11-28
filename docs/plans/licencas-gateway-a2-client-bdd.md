@@ -40,30 +40,45 @@ esta unidade não implementa pré-gate nem consumidor. Aceite desta unidade não
 
 ## Configuração (falha fechada)
 
-`load_licencas_config()` lê `os.environ` (o mesmo mecanismo que o gateway usa para segredos: `~/.hermes/.env`
-carregado no ambiente do processo) e devolve `LicencasClientConfig`, dataclass congelada que valida tudo na
-construção. As 11 variáveis são obrigatórias; faltou ou veio fora da forma, levanta `LicencasConfigError` com o
-**nome** da variável (nunca o valor) e nenhum cliente é criado. Não há valor padrão para nenhuma.
+`load_licencas_config(read=os.environ.get, *, raw_config=<disco>)` devolve `LicencasClientConfig`, dataclass congelada que
+valida tudo na construção. A configuração tem duas fontes, sem sobreposição:
 
-| Variável | Forma | Observação |
+- **Nove opções não secretas: só o `config.yaml`**, seção `licencas_followup` do perfil base, lido pelo leitor estrito
+  que a guarda já usa (`gateway/licencas_followup.py`; o cliente importa o leitor, a guarda nunca importa o cliente).
+  O YAML é soberano: não há fallback para variável de ambiente nem valor padrão que resgate ausência (`policy_epoch: 0`
+  é inválido). O contrato antigo de 11 variáveis de ambiente foi removido: era o defeito (P1 da PR #5).
+- **Dois segredos: só o leitor de credenciais `read`.** Ele só é consultado para `LICENCAS_CAPABILITY` e
+  `LICENCAS_HMAC_KEY_B64`, e só depois de as nove opções públicas serem validadas. O padrão `os.environ.get` é
+  compatibilidade; o conector isolado injeta um leitor dedicado. Segredo no YAML é recusado (`secret_in_config`).
+
+`raw_config` (raiz bruta do YAML) é injeção opcional só por palavra-chave: omitido, lê o disco; `None` explícito é
+inválido e não volta ao disco. Falha (arquivo ilegível, YAML inválido, duplicado, com alias ou merge, seção ausente,
+chave desconhecida, `enabled` que não seja booleano, opção ausente, vazia ou fora da forma) levanta
+`LicencasConfigError` com o **nome** da opção ou um código fixo (`config_yaml`, `config_root`, `licencas_followup`,
+`unexpected_key`, `secret_in_config`), nunca o valor, e nenhum cliente é criado. `enabled` é aceito mas não liga nada.
+
+| Chave em `licencas_followup` | Forma | Observação |
 |---|---|---|
-| `LICENCAS_API_URL` | `https://<host>[:porta]<caminho>`, sem credencial, query, fragmento ou barra final | O caminho precisa terminar no pathname assinado |
-| `LICENCAS_API_SIGNED_PATHNAME` | `/segmento[/segmento…]` | O pathname que a Edge assina (hoje `/licencas-api`) |
+| `api_url` | `https://<host>[:porta]<caminho>`, sem credencial, query, fragmento ou barra final | O caminho precisa terminar no pathname assinado |
+| `signed_pathname` | `/segmento[/segmento…]` | O pathname que a Edge assina (hoje `/licencas-api`) |
+| `key_id` | `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` | Mesmo valor da Edge |
+| `principal_id` | idem | Mesmo valor da Edge |
+| `instance_id` | JID da conta WhatsApp | Mesmo valor da Edge |
+| `policy_id` | UUID minúsculo | Mesmo valor da Edge |
+| `group_jid` | `<dígitos>@g.us` | Mesmo valor da Edge |
+| `policy_epoch` | `int` YAML estrito (não bool, texto nem float), 1 a 2^53−1 | Mesmo valor da Edge |
+| `account_binding_hash` | 64 hex minúsculos | Mesmo valor da Edge |
+
+| Credencial (leitor) | Forma | Observação |
+|---|---|---|
 | `LICENCAS_CAPABILITY` | 32–512 de `[A-Za-z0-9._~+/=-]`; forma de JWT ou prefixo `sb_` recusados | Segredo. Mesmo valor da Edge |
 | `LICENCAS_HMAC_KEY_B64` | base64 canônico de 32–128 bytes | Segredo. Mesmo valor da Edge |
-| `LICENCAS_KEY_ID` | `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` | Mesmo valor da Edge |
-| `LICENCAS_PRINCIPAL_ID` | idem | Mesmo valor da Edge |
-| `LICENCAS_INSTANCE_ID` | JID da conta WhatsApp | Mesmo valor da Edge |
-| `LICENCAS_POLICY_ID` | UUID minúsculo | Mesmo valor da Edge |
-| `LICENCAS_GROUP_JID` | `<dígitos>@g.us` | Mesmo valor da Edge |
-| `LICENCAS_POLICY_EPOCH` | inteiro decimal ≥ 1, até 2^53−1 | Mesmo valor da Edge |
-| `LICENCAS_ACCOUNT_BINDING_HASH` | 64 hex minúsculos | Mesmo valor da Edge |
 
-As nove últimas têm o mesmo nome e a mesma forma das variáveis da Edge (`LICENCAS_ENV` em `contract.ts`). A chave do
-cursor (`LICENCAS_CURSOR_MAC_KEY`) **não** vai para o gateway (§2.3).
+Leitor que levanta exceção, devolve tipo errado, `None` ou vazio vira `LicencasConfigError` com o nome do segredo, sem
+causa nem contexto encadeados. A chave do cursor (`LICENCAS_CURSOR_MAC_KEY`) **não** vai para o gateway (§2.3).
 
 Loopback: `LicencasClient(config, loopback_test_port=<porta>)` troca o destino por `http://127.0.0.1:<porta><pathname
-assinado>`. É um argumento do construtor. `LicencasClient.from_env()` não o aceita, nenhuma variável de ambiente o
+assinado>`. É um argumento do construtor. `LicencasClient.from_env()` não o aceita, nenhuma variável de ambiente nem chave do YAML o
 alcança e ele não é campo da configuração. Existe só para a prova de interoperabilidade local.
 
 ## Contextos
@@ -148,7 +163,8 @@ Uma linha por chamada, no logger `gateway.licencas_client`:
 | 12 | DTOs estritos | Chave extra, faltante, tipo errado e não-objeto em cada operação, mais 30 desvios específicos | `test_malformed_response_is_a_typed_error` |
 | 13 | §5 JSON estrito | Resposta com chave duplicada, NaN, BOM, lixo, UTF-8 inválido | `test_response_json_is_strict` |
 | 14 | §5 16 KiB e NaN | 26 recusas locais com zero pedidos; 16 384 bytes passam, 16 385 não | `test_refused_before_sending`, `test_largest_accepted_body_is_exactly_16_kib` |
-| 15 | §5 configuração | Tipo fechado; cada variável ausente ou vazia; 34 formas inválidas (http, query, fragmento, credencial, outro caminho, JWT, chave curta…); construção direta também valida | `test_config_loads_from_reader_into_closed_type`, `test_missing_or_empty_variable_fails_closed`, `test_invalid_configuration_fails_closed`, `test_config_type_validates_direct_construction`, `test_default_reader_is_the_process_environment` |
+| 15 | §5 configuração | Tipo fechado; segredo ausente ou vazio; opções públicas inválidas (http, query, fragmento, credencial, outro caminho…) e segredos inválidos (JWT, chave curta…); construção direta também valida | `test_config_loads_into_closed_type`, `test_missing_or_empty_secret_fails_closed`, `test_invalid_public_option_fails_closed`, `test_invalid_secret_fails_closed`, `test_config_type_validates_direct_construction`, `test_default_reader_is_the_process_environment` |
+| 15b | P1 PR #5 config.yaml | `config.yaml` real (HERMES_HOME temporário, YAML sintético) é a única fonte das nove opções, com ambiente conflitante e leitor espião só com os dois segredos; opção ausente/vazia/nula, `policy_epoch` não-`int` ou fora de 1..2^53−1, `enabled` não booleano, chave desconhecida, segredo no YAML, YAML inválido/duplicado/alias/merge, arquivo ausente ou ilegível, `raw_config` inválido ou `None` falham fechado **antes** de ler credencial; `raw_config` não toca o disco; perfil base ignora override; leitor que falha é sanitizado; erros e logs sem valores públicos | `test_loader_reads_the_real_config_yaml_and_only_the_two_secrets`, `test_from_env_reads_yaml_even_with_conflicting_environment`, `test_yaml_missing_or_empty_option_fails_before_credentials`, `test_yaml_policy_epoch_must_be_a_strict_int`, `test_yaml_policy_epoch_accepts_the_range_edges`, `test_yaml_values_keep_every_existing_validator`, `test_invalid_raw_config_structure_fails_closed`, `test_explicit_none_raw_config_never_falls_back_to_disk`, `test_raw_config_injection_does_not_touch_the_disk`, `test_yaml_file_that_is_not_one_explicit_section_fails_closed`, `test_missing_config_file_and_io_error_fail_closed`, `test_base_profile_ignores_a_context_override`, `test_secret_key_in_yaml_is_refused_without_echoing_it`, `test_unknown_yaml_key_is_refused`, `test_credential_reader_failures_are_sanitized`, `test_config_errors_and_logs_never_carry_public_values` |
 | 16 | §5 transporte | Sem redirect, sem `trust_env`, TLS com verificação e hostname, timeouts explícitos, proxy do ambiente ignorado, cookies nunca guardados | `test_http_client_is_locked_down`, `test_proxy_environment_is_ignored`, `test_cookies_are_never_stored_or_sent` |
 | 17 | prova local | Loopback só pelo argumento explícito | `test_loopback_only_through_explicit_test_parameter` |
 | 18 | §5 anti-replay | Nonce (≥128 bits) e request_id diferentes em 25 pedidos; timestamp do relógio a cada pedido | `test_nonce_and_request_id_are_fresh_on_every_request`, `test_timestamp_comes_from_the_clock_at_each_request` |
@@ -218,7 +234,7 @@ parâmetros na ordem do mapa literal, `operation` do contexto, 19 chaves no cont
 
 ## O que A2-pregate e A2-consumer precisam saber
 
-- **Criação**: `LicencasClient.from_env()` uma vez, no start gerenciado; `await client.aclose()` no stop.
+- **Criação**: `LicencasClient.from_env(<leitor dedicado dos dois segredos>)` uma vez, no start gerenciado (o nome `from_env` é histórico: as nove opções vêm do `config.yaml`); `await client.aclose()` no stop.
   `LicencasConfigError` fecha só a integração protegida. Nunca cair no caminho legado por falta de configuração.
 - **Importar `gateway.licencas_client`** não lê ambiente nem abre rede. O `gateway/__init__.py` existente já importa
   `config`, `session` e `delivery`; isso é anterior a esta unidade.

@@ -28,7 +28,7 @@ Fontes: `B-EXECUTION-CONTRACTS.md` §1, §5 (A2 itens 1, 2 e 5), §6 e §7; `DEL
 | `tools/send_message_tool.py` (follow-up P1, sexto arquivo autorizado) | Barreira em `_send_whatsapp`, que fala direto com a bridge |
 | `tests/gateway/test_whatsapp_group_gating.py` | 26 testes anteriores intactos + os desta unidade |
 
-`gateway/licencas_client.py` e o teste dele **não mudaram** (ver "Cliente").
+`gateway/licencas_client.py` e o teste dele mudaram só na correção P1 da PR #5 (ver "Cliente"); a guarda não mudou.
 
 ## Configuração
 
@@ -146,9 +146,12 @@ dentro do processo de teste. Não provam nada sobre a bridge real, o WhatsApp ou
 
 ## Cliente (A2-client)
 
-`gateway/licencas_client.py` não foi alterado em nenhuma rodada e a guarda **não o importa** (U1). Quem monta
-`load_licencas_config` e o `LicencasClient` é o conector dedicado, com leitor próprio e segredo próprio
-(U2). `LicencasClient.from_env()` sem argumento ainda existe e não deve ser usado.
+A guarda **não importa** o cliente (U1). Quem monta `load_licencas_config` e o `LicencasClient` é o conector
+dedicado, com leitor próprio e segredo próprio (U2). Correção P1 da PR #5: o cliente agora lê as nove opções não
+secretas da seção `licencas_followup` do `config.yaml` (leitor estrito da guarda importado pelo cliente, nunca o
+contrário; sem fallback para ambiente) e consulta o leitor de credenciais só para `LICENCAS_CAPABILITY` e
+`LICENCAS_HMAC_KEY_B64`. Ver `licencas-gateway-a2-client-bdd.md`, "Configuração". `LicencasClient.from_env()` sem
+argumento continua existindo por compatibilidade (lê `os.environ` só para os dois segredos).
 
 ## Decisões do executor (onde o contrato não fixava)
 
@@ -304,7 +307,7 @@ não a configuração mesclada com defaults: instalação sem a seção no arqui
 | 1 | P2 | YAML inválido no `config.yaml` cala todos os grupos de WhatsApp mesmo sem a integração (decisão 3) | Coordenador | Indisponibilidade de grupos por erro de edição alheio à integração |
 | 2 | P2 | Mensagem do grupo que chega por `/messages` é descartada sem destino durável (bridge fora do escopo durável) | A2-consumer / A2-health | Perda de mensagem enquanto a bridge não estiver configurada para o grupo |
 | 3 | P2 | A configuração durável da bridge (`WHATSAPP_DURABLE_*`) continua só no ambiente; não é derivada da seção `licencas_followup` nem conferida contra ela | A2-health | Gateway protege um grupo e a bridge outro |
-| 4 | P3 | `LicencasClient.from_env()` sem argumento continua existindo; com os segredos fora do ambiente ele falha fechado | A2-consumer | Caminho morto no cliente |
+| 4 | P3 | `LicencasClient.from_env()` sem argumento continua existindo (compatibilidade); só os dois segredos vêm do ambiente e, ausentes, ele falha fechado | A2-consumer | Caminho morto no cliente |
 | 5 | P3 | Uma linha WARNING por bloqueio, sem limite de taxa | Operação | Volume de log se a bridge estiver mal configurada |
 | 6 | P3 | Contadores só em memória, sem exposição em health | A2-consumer | Sem visibilidade externa |
 | 7 | P3 | A resposta do agente recusada passa duas vezes pela barreira (tentativa e fallback em texto puro de `_send_with_retry`) | — | Contagem `outbound` em dobro nesse caminho |
